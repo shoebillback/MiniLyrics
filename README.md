@@ -31,7 +31,6 @@ Windows 原生桌面歌词小窗，基于 BetterNCM、RefinedNowPlayingNext 与 
 | `build.ps1` | 编译原生显示端并生成插件包 |
 | `main.js` / `MiniLyricsHost.exe` | 随版本提供的运行文件 |
 | `dist/` | 当前版本的插件安装包 |
-| `docs/` | 历史说明、开发环境、性能与验证记录 |
 
 ## 构建
 
@@ -63,7 +62,7 @@ Windows 原生专项会编译独立测试程序：
 powershell -NoProfile -File .\tests\native.ps1 -Focus cleanup -ResultDirectory "$env:TEMP\MiniLyrics-native-tests"
 ```
 
-其他专项及历史测试范围见 [环境记录](docs/ENVIRONMENT.md)、[性能记录](docs/PERFORMANCE.md) 和 [完整说明](docs/HISTORY.md)。历史记录中的“通过”属于相应版本及环境，不代表每次发布均运行完整矩阵；真实网易云会话效果仍需联调。
+其他专项见 `tests/`；`native.ps1 -Focus all` 运行默认原生回归，专项名称见脚本的 `Focus` 参数。测试输出放在 `work/` 或指定目录，不提交到仓库。独立测试不等于真实网易云会话联调。
 
 ## 版本与许可证
 

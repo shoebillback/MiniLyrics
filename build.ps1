@@ -27,7 +27,7 @@ try {
  # Include runtime files and the complete corresponding source for GPL distribution.
  $files = @('manifest.json','main.js','MiniLyricsHost.exe','LICENSE','THIRD_PARTY.md',
   'README.md','CHANGELOG.md','core.js','plugin.js','build.ps1')
- foreach ($directory in @('native','tests','docs','licenses')) {
+ foreach ($directory in @('native','tests','licenses')) {
   $files += Get-ChildItem -LiteralPath (Join-Path $taskRoot $directory) -File -Recurse |
    Where-Object { $_.Extension -in @('.cpp','.hpp','.cjs','.ps1','.md','.txt') } |
    ForEach-Object { $_.FullName.Substring($taskRoot.Length + 1).Replace('\','/') }
