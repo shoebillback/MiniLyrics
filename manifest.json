@@ -1,0 +1,24 @@
+{
+  "manifest_version": 1,
+  "name": "MiniLyrics",
+  "slug": "MiniLyrics",
+  "version": "0.6.17",
+  "author": "Yushun Wang",
+  "description": "RNP 歌词 + InfLink 播放信息与控制，Direct2D 自适应桌面小窗。",
+  "type": "extension",
+  "betterncm_version": ">=1.0.0",
+  "ncm-version-req": ">=3.1.11",
+  "ncm3-compatible": true,
+  "loadAfter": [
+    "RefinedNowPlayingNext",
+    "InfLink-rs"
+  ],
+  "license": "GPL-3.0-or-later",
+  "injects": {
+    "Main": [
+      {
+        "file": "main.js"
+      }
+    ]
+  }
+}

@@ -1,0 +1,12 @@
+/outputs/
+/work/
+/node_modules/
+*.exe
+!/MiniLyricsHost.exe
+*.o
+*.obj
+*.pdb
+*.log
+*.tmp
+/tests/*.bmp
+/tests/*.png
