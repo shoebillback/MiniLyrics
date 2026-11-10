@@ -43,8 +43,11 @@ jobs:
         shell: msys2 {0}
         run: cygpath -w /ucrt64/bin >> "$GITHUB_PATH"
       - name: Compile native host and package full source
+        id: package
         run: |
           ./build.ps1
+          $version = (Get-Content -LiteralPath ./manifest.json -Raw | ConvertFrom-Json).version
+          "version=$version" >> $env:GITHUB_OUTPUT
       - name: Run existing bridge and configuration regressions
         run: |
           node --test tests/core.test.cjs tests/bridge.test.cjs tests/background.test.cjs tests/update-flow.test.cjs
@@ -64,7 +67,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: source-inclusive-plugin
-          path: dist/*.plugin
+          path: dist/MiniLyrics-${{ steps.package.outputs.version }}.plugin
           if-no-files-found: error
 
   publish:
