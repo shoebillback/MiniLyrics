@@ -1,6 +1,6 @@
 # MiniLyrics
 
-Windows 原生桌面歌词小窗，基于 BetterNCM、RefinedNowPlayingNext 与 InfLink-rs。当前版本 **0.6.17**。
+Windows 原生桌面歌词小窗，基于 BetterNCM、RefinedNowPlayingNext 与 InfLink-rs。本地上架准备版本 **0.6.18（未发布）**，作者 **shoebillback**。
 
 显示端使用 C++ / Win32 / Direct2D / DirectWrite，JavaScript 负责歌词、播放信息及控制桥接。运行时无需安装 .NET、Node.js 或 WebView2。
 
@@ -15,7 +15,7 @@ Windows 原生桌面歌词小窗，基于 BetterNCM、RefinedNowPlayingNext 与 
 
 需要 Windows 10/11 x64、网易云音乐 3.1.11+、BetterNCM ≥ 1.0.0、RefinedNowPlayingNext 与 InfLink-rs。
 
-1. 下载 [MiniLyrics-0.6.17.plugin](https://github.com/shoebillback/MiniLyrics/raw/refs/heads/main/dist/MiniLyrics-0.6.17.plugin)。
+1. 本准备版本尚未在线发布；本地编译后从 `dist/MiniLyrics-0.6.18.plugin` 安装。正式发布流程见下文。
 2. 完全退出网易云音乐与旧 MiniLyrics 小窗，将插件包放入 BetterNCM 数据目录下的 `plugins` 文件夹，替换旧包。
 3. 重启网易云，在 MiniLyrics 设置中点击“打开 / 找回小窗”。
 
@@ -49,6 +49,16 @@ powershell -NoProfile -File .\build.ps1 -SkipNativeBuild -OutputDirectory .\dist
 
 ## 版本与许可证
 
-0.6.17 精简重复状态、绘制与消息处理，保留未变化的歌词排版缓存。详见 [CHANGELOG.md](CHANGELOG.md)。
+0.6.18 准备商店发布流程、预览图与设置页反馈入口。详见 [CHANGELOG.md](CHANGELOG.md)。
 
 项目采用 [GPL-3.0-or-later](LICENSE)，第三方来源和许可证见 [THIRD_PARTY.md](THIRD_PARTY.md) 与 licenses 目录。
+
+## 插件商店发布
+
+源码在 main 分支；plugin-release 分支由 GitHub Actions 手动发布任务生成，包含自动编译的原生程序和商店运行文件。不要手工复制本地 EXE 到发行分支。
+
+在 Actions 中运行 Build MiniLyrics，选择 main 并勾选 publish。构建与脚本回归成功后才更新 plugin-release；普通 push/PR 只构建并上传检查产物。发布分支中 SOURCE.txt 指向确切源码提交和构建记录，SHA256SUMS.txt 记录运行文件摘要。
+
+上架登记使用 shoebillback/MiniLyrics 的 plugin-release 分支。首次提交前需完成一次线上构建发布，并在实际网易云环境验证安装、依赖、逐字歌词和控制操作。版本升级同时更新 manifest.json 和 CHANGELOG.md，再手动发布。
+
+许可证为 GPL-3.0-or-later，第三方声明保持不变；设置页提供源码和问题反馈入口。

@@ -1,0 +1,16 @@
+/.git/
+/.github/
+/.gitattributes
+/.gitignore
+/.betterncm-ignore
+/dist/
+/work/
+/outputs/
+/tests/
+/native/
+/tools/
+/core.js
+/plugin.js
+/build.ps1
+/README.md
+/CHANGELOG.md

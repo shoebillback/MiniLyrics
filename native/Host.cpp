@@ -1,5 +1,5 @@
 // MiniLyrics native Win32 / Direct2D / DirectWrite host.
-// Copyright (C) 2026 Yushun Wang. GPL-3.0-or-later.
+// Copyright (C) 2026 shoebillback. GPL-3.0-or-later.
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #define _WIN32_WINNT 0x0A00

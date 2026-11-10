@@ -1,5 +1,5 @@
 (function(){
-const MINILYRICS_VERSION="0.6.17";
+const MINILYRICS_VERSION="0.6.18";
 /* MiniLyrics, GPL-3.0-or-later. Pure normalization shared by plugin and tests. */
 (function (root) {
   'use strict';
@@ -261,6 +261,12 @@ const MINILYRICS_VERSION="0.6.17";
     speed.onchange=()=>changeBackground({speed:Number(speed.value)});rate.onchange=()=>changeBackground({fps:Number(rate.value)});
     addRow('背景样式',mode);addRow('动态流动',animated);addRow('流动速度',speed);addRow('背景帧率',rate);refreshControls();
     const tip=document.createElement('p');tip.textContent='Lyricify 背景使用封面旋转、模糊和网格形变。背景默认 30 FPS，可选 10 / 15 / 30 / 45 / 60 FPS，独立于歌词帧率。播放时流动，暂停时冻结；调整窗口大小时暂时保持当前背景，松手后更新。关闭“动态流动”可保留静态效果。设置自动保存。';el.append(tip);
+    const links=document.createElement('p');
+    for(const [label,url]of [['源码与许可证','https://github.com/shoebillback/MiniLyrics'],['反馈问题','https://github.com/shoebillback/MiniLyrics/issues']]){
+      const link=document.createElement('a');link.textContent=label;link.href=url;link.style.cssText='margin-right:18px';
+      link.onclick=event=>{event.preventDefault();betterncm.ncm.openUrl(url);};links.append(link);
+    }
+    el.append(links);
     const s=document.createElement('p');statusView=s;refreshStatus();el.append(s);return el;
   });
   window.__miniLyrics={open,dispose,getStatus:()=>status,getDiagnostics:()=>({version:MINILYRICS_VERSION,status,songId:song.id,ncmId:song.ncmId,

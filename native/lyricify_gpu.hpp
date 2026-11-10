@@ -1,5 +1,5 @@
 // MiniLyrics native D3D11 adapter for Lyricify Backgrounds (Apache-2.0 shader/mesh).
-// Adapter Copyright (C) 2026 Yushun Wang, GPL-3.0-or-later.
+// Adapter Copyright (C) 2026 shoebillback, GPL-3.0-or-later.
 #pragma once
 #include <d3d11.h>
 #include <d3dcompiler.h>

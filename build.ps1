@@ -26,7 +26,7 @@ $zip = [IO.Compression.ZipFile]::Open($packagePath,[IO.Compression.ZipArchiveMod
 try {
  # Include runtime files and the complete corresponding source for GPL distribution.
  $files = @('manifest.json','main.js','MiniLyricsHost.exe','LICENSE','THIRD_PARTY.md',
-  'README.md','CHANGELOG.md','core.js','plugin.js','build.ps1')
+  'README.md','CHANGELOG.md','preview.png','core.js','plugin.js','build.ps1')
  foreach ($directory in @('native','tests','licenses')) {
   $files += Get-ChildItem -LiteralPath (Join-Path $taskRoot $directory) -File -Recurse |
    Where-Object { $_.Extension -in @('.cpp','.hpp','.cjs','.ps1','.md','.txt') } |

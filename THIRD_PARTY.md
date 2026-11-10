@@ -8,7 +8,7 @@ Uses code from WXRIW and contributors, https://github.com/WXRIW/Lyricify-Backgro
 
 - native/lyricify_shader.hpp embeds AppleMusicIosBackground.hlsl unchanged (upstream blob b7f04a0a8d4ecbccadd4309030c815be0d2cf0a0).
 - native/lyricify_presets.hpp ports portrait preset 0 and landscape preset 0 coordinates from AppleMusicIosMesh.cs (blob ea50e86a7265263b730766879ab04f106b6ada5e).
-- native/lyricify_gpu.hpp translates the subdivision method to C++ and adds a MiniLyrics D3D11 host, fixed low-resolution surfaces and Direct2D compatibility readback. These adapter changes are by Yushun Wang, 2026.
+- native/lyricify_gpu.hpp translates the subdivision method to C++ and adds a MiniLyrics D3D11 host, fixed low-resolution surfaces and Direct2D compatibility readback. These adapter changes are by shoebillback, 2026.
 
 This is an adapted background pipeline, not the complete Lyricify WPF/WinUI renderer. Audio reactivity, random preset selection and ordinary/lyrics layout switching are not included. Shader compilation uses the Windows D3DCompiler system component. Standard/dark styling, frame limits, cover transitions and error fallback are controlled by MiniLyrics.
 

@@ -1,0 +1,106 @@
+name: Build MiniLyrics
+'on':
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish CI-built runtime files to plugin-release
+        type: boolean
+        required: true
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: minilyrics-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Install MinGW-w64 compiler
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: mingw-w64-ucrt-x86_64-gcc
+          path-type: inherit
+      - name: Add compiler to PATH
+        shell: msys2 {0}
+        run: cygpath -w /ucrt64/bin >> "$GITHUB_PATH"
+      - name: Compile native host and package full source
+        run: |
+          ./build.ps1
+      - name: Run existing bridge and configuration regressions
+        run: |
+          node --test tests/core.test.cjs tests/bridge.test.cjs tests/background.test.cjs tests/update-flow.test.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Script regression failed' }
+      - name: Stage market runtime
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          BUILD_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          ./tools/prepare-market.ps1 -OutputDirectory ./work/market-runtime -SourceCommit $env:SOURCE_COMMIT -Repository $env:SOURCE_REPOSITORY -BuildUrl $env:BUILD_URL
+      - uses: actions/upload-artifact@v7
+        with:
+          name: market-runtime
+          path: work/market-runtime/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: source-inclusive-plugin
+          path: dist/*.plugin
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v8
+        with:
+          name: market-runtime
+          path: staged-runtime
+      - name: Update dedicated market branch
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --heads origin plugin-release >/dev/null; then
+            git fetch origin plugin-release
+            git worktree add -b market-publish release-worktree origin/plugin-release
+          else
+            git worktree add --detach release-worktree
+            git -C release-worktree checkout --orphan market-publish
+          fi
+          # Remove tracked files only inside the dedicated worktree; retain branch history.
+          git -C release-worktree rm -r --ignore-unmatch .
+          cp -a staged-runtime/. release-worktree/
+          git -C release-worktree config user.name 'github-actions[bot]'
+          git -C release-worktree config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C release-worktree add --all
+          if ! git -C release-worktree diff --cached --quiet; then
+            git -C release-worktree commit -m "Publish MiniLyrics from $SOURCE_COMMIT"
+            git -C release-worktree push origin HEAD:refs/heads/plugin-release
+          fi
