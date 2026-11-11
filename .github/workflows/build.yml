@@ -95,7 +95,7 @@ jobs:
             git worktree add -b market-publish release-worktree origin/plugin-release
           else
             git worktree add --detach release-worktree
-            git -C release-worktree checkout --orphan market-publish
+            git -C release-worktree switch --orphan market-publish
           fi
           # Remove tracked files only inside the dedicated worktree; retain branch history.
           git -C release-worktree rm -r --ignore-unmatch .
