@@ -1,6 +1,6 @@
 # MiniLyrics
 
-Windows 原生桌面歌词小窗，基于 BetterNCM、RefinedNowPlayingNext 与 InfLink-rs。本地上架准备版本 **0.6.18（未发布）**，作者 **shoebillback**。
+Windows 原生桌面歌词小窗，基于 BetterNCM、RefinedNowPlayingNext 与 InfLink-rs。当前版本 **0.6.19**，作者 **shoebillback**。
 
 显示端使用 C++ / Win32 / Direct2D / DirectWrite，JavaScript 负责歌词、播放信息及控制桥接。运行时无需安装 .NET、Node.js 或 WebView2。
 
@@ -15,7 +15,7 @@ Windows 原生桌面歌词小窗，基于 BetterNCM、RefinedNowPlayingNext 与 
 
 需要 Windows 10/11 x64、网易云音乐 3.1.11+、BetterNCM ≥ 1.0.0、RefinedNowPlayingNext 与 InfLink-rs。
 
-1. 本准备版本尚未在线发布；本地编译后从 `dist/MiniLyrics-0.6.18.plugin` 安装。正式发布流程见下文。
+1. 从 GitHub Actions 的成功构建记录下载 `source-inclusive-plugin` 产物，解压得到 `MiniLyrics-0.6.19.plugin`；也可本地编译生成。商店收录后可直接从商店安装。
 2. 完全退出网易云音乐与旧 MiniLyrics 小窗，将插件包放入 BetterNCM 数据目录下的 `plugins` 文件夹，替换旧包。
 3. 重启网易云，在 MiniLyrics 设置中点击“打开 / 找回小窗”。
 
@@ -49,7 +49,7 @@ powershell -NoProfile -File .\build.ps1 -SkipNativeBuild -OutputDirectory .\dist
 
 ## 版本与许可证
 
-0.6.18 准备商店发布流程、预览图与设置页反馈入口。详见 [CHANGELOG.md](CHANGELOG.md)。
+0.6.19 移除全局鼠标穿透快捷键；鼠标穿透可在插件设置页恢复。详见 [CHANGELOG.md](CHANGELOG.md)。
 
 项目采用 [GPL-3.0-or-later](LICENSE)，第三方来源和许可证见 [THIRD_PARTY.md](THIRD_PARTY.md) 与 licenses 目录。
 

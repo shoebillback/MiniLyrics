@@ -1,5 +1,5 @@
 (function(){
-const MINILYRICS_VERSION="0.6.18";
+const MINILYRICS_VERSION="0.6.19";
 /* MiniLyrics, GPL-3.0-or-later. Pure normalization shared by plugin and tests. */
 (function (root) {
   'use strict';
@@ -247,7 +247,7 @@ const MINILYRICS_VERSION="0.6.18";
     const title=document.createElement('h2');title.textContent='MiniLyrics 音乐小窗';el.append(title);
     for(const [text,fn]of [['打开 / 找回小窗',open],['退出鼠标穿透',()=>send({type:'unlock'})],['重置位置和尺寸',()=>send({type:'reset'})],['关闭小窗',()=>send({type:'exit'})]]){
       const b=document.createElement('button');b.textContent=text;b.style.cssText='padding:8px 14px;margin:0 8px 12px 0';b.onclick=fn;el.append(b);}
-    const p=document.createElement('p');p.textContent='左侧封面可拖动；右下角可缩放。在歌词区滚动鼠标滚轮可回看前后歌词，停止滚动约 4 秒后回到当前句，点击歌词可跳转。Ctrl + Alt + L 切换鼠标穿透；右键小窗可切换翻译与帧率。默认 30 FPS，也可选择 60 FPS。';el.append(p);
+    const p=document.createElement('p');p.textContent='左侧封面可拖动；右下角可缩放。在歌词区滚动鼠标滚轮可回看前后歌词，停止滚动约 4 秒后回到当前句，点击歌词可跳转。开启鼠标穿透后，可在 MiniLyrics 设置中点击“退出鼠标穿透”恢复操作；右键小窗可切换翻译与帧率。默认 30 FPS，也可选择 60 FPS。';el.append(p);
     const heading=document.createElement('h3');heading.textContent='背景';el.append(heading);
     const makeSelect=(id,choices,value)=>{const control=document.createElement('select');control.id=id;control.style.cssText='padding:5px 8px;margin-left:12px';for(const [v,text]of choices){const option=document.createElement('option');option.value=String(v);option.textContent=text;control.append(option);}control.value=String(value);return control;};
     const addRow=(text,control)=>{const row=document.createElement('label');row.style.cssText='display:block;margin:10px 0';const label=document.createElement('span');label.textContent=text;row.append(label,control);el.append(row);};
