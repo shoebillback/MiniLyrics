@@ -142,7 +142,7 @@ struct NativeTest {
   InterludeAnimation visual;visual.update(true,true,0);expectNear(visual.opacity.value(499),0,"RNP waits 500ms before fading in");require(visual.opacity.value(750)>0&&visual.opacity.value(750)<1,"RNP fades in over the following 500ms");expectNear(visual.opacity.value(1000),1,"RNP interlude is fully visible after one second");
   expectNear(visual.scale(0),1,"RNP breath begins at normal scale");expectNear(visual.scale(1000),1.1,"RNP breath reaches 1.1 at one second");expectNear(visual.scale(2000),1,"RNP breath repeats every two seconds");
   visual.update(false,true,2000,6000,0,6000);expectNear(visual.dot(6000,0,6000,0,2000).alpha,.9,"RNP exit starts from the previous dot opacity");auto exiting=visual.dot(6000,0,6000,0,2100);require(exiting.alpha>.2&&exiting.alpha<.9&&exiting.scale>.9&&exiting.scale<1,"RNP dots reset smoothly over 200ms");expectNear(visual.dot(6000,0,6000,0,2200).alpha,.2,"RNP dot reset completes after 200ms");
-  Fixture f;auto&a=f.a;a.width=600;a.height=160;a.viewportBottom=132;a.textX=20;a.playing=true;a.valid=true;a.position=1000;
+  Fixture f;auto&a=f.a;a.width=600;a.height=160;a.viewportBottom=132;a.textX=20;a.playing=true;a.valid=true;a.position=1000;a.fps=30;
   Line first;first.time=6000;first.duration=5000;first.text=L"First lyric";a.lines={first};a.index=a.rowAt(1000);a.updatePlaceholders();f.layout(0);
   require(a.lyricView()==App::LyricView::Prelude,"confirmed time before first lyric selects prelude");
   require(a.groupVisible(a.group(0),a.motionNow()),"prelude reuses its real preview group for drawing and hit testing");
@@ -235,7 +235,7 @@ struct NativeTest {
   a.background.animated=false;expectNear(f.interval(21000),200,"static fluid does not force background frames");a.background.mode=0;a.background.animated=true;expectNear(f.interval(21000),200,"gradient preserves idle scheduling");
   a.background.mode=1;a.playing=false;a.update();require(!a.frameRunning,"paused background stops scheduling");a.playing=true;a.valid=false;a.update();require(!a.frameRunning,"stalled playback freezes background");
   a.valid=true;a.lines.clear();a.groups.clear();a.index=-1;a.focusIndex=-1;a.background.fps=15;f.interval(0);expectNear(a.framePeriod,1000./15,"fluid still animates when a playing track has no lyrics");
-  Json invalid=Json::obj();invalid["mode"]=-100;invalid["fps"]=1;invalid["speed"]=1000;a.readBackground(invalid);require(a.background.mode==0&&a.background.fps==30&&a.background.speed==3,"native background options are bounded");
+  Json invalid=Json::obj();invalid["mode"]=-100;invalid["fps"]=1;invalid["speed"]=1000;a.readBackground(invalid);require(a.background.mode==0&&a.background.fps==60&&a.background.speed==3,"native background options are bounded");
   if(!directory.empty()){
    a.background={3,false,2,30};a.settingsPath=(directory/"background-settings.json").wstring();a.save();require(std::filesystem::exists(a.settingsPath),"background settings saved");
    auto previous=env(L"MINILYRICS_SETTINGS");SetEnvironmentVariableW(L"MINILYRICS_SETTINGS",a.settingsPath.c_str());App restored;SetEnvironmentVariableW(L"MINILYRICS_SETTINGS",previous.empty()?nullptr:previous.c_str());require(restored.background==a.background,"background options restore from settings file");
@@ -304,7 +304,7 @@ struct NativeTest {
   // Three critical scenarios: independent rates, batched programmatic resize,
   // and actual capture-based live resize with a frozen/resumed background.
   Fixture f;auto&a=f.a;f.lines();f.layout(10);a.background={};
-  require(a.background.fps==30,"new background default is 30 FPS");
+  require(a.background.fps==60,"new background default is 60 FPS");
   FluidBackground cached;
   Json metrics=Json::obj();metrics["rates"].kind=Json::Array;
   for(int rate:{10,15,30,45,60}){

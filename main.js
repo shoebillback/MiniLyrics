@@ -1,5 +1,5 @@
 (function(){
-const MINILYRICS_VERSION="0.6.19";
+const MINILYRICS_VERSION="0.6.20";
 /* MiniLyrics, GPL-3.0-or-later. Pure normalization shared by plugin and tests. */
 (function (root) {
   'use strict';
@@ -47,7 +47,7 @@ const MINILYRICS_VERSION="0.6.19";
   function normalizeBackground(value){
     const v=value&&typeof value==='object'?value:{},mode=Number(v.mode),speed=Number(v.speed),fps=Number(v.fps);
     return {mode:Number.isInteger(mode)&&mode>=0&&mode<=3?mode:1,animated:typeof v.animated==='boolean'?v.animated:true,
-      speed:[.5,1,2].includes(speed)?speed:1,fps:[10,15,30,45,60].includes(fps)?fps:30};
+      speed:[.5,1,2].includes(speed)?speed:1,fps:[10,15,30,45,60].includes(fps)?fps:60};
   }
   let background;try{
     background=normalizeBackground(plugin.getConfig?.('background',{}));
@@ -247,20 +247,20 @@ const MINILYRICS_VERSION="0.6.19";
     const title=document.createElement('h2');title.textContent='MiniLyrics 音乐小窗';el.append(title);
     for(const [text,fn]of [['打开 / 找回小窗',open],['退出鼠标穿透',()=>send({type:'unlock'})],['重置位置和尺寸',()=>send({type:'reset'})],['关闭小窗',()=>send({type:'exit'})]]){
       const b=document.createElement('button');b.textContent=text;b.style.cssText='padding:8px 14px;margin:0 8px 12px 0';b.onclick=fn;el.append(b);}
-    const p=document.createElement('p');p.textContent='左侧封面可拖动；右下角可缩放。在歌词区滚动鼠标滚轮可回看前后歌词，停止滚动约 4 秒后回到当前句，点击歌词可跳转。开启鼠标穿透后，可在 MiniLyrics 设置中点击“退出鼠标穿透”恢复操作；右键小窗可切换翻译与帧率。默认 30 FPS，也可选择 60 FPS。';el.append(p);
+    const p=document.createElement('p');p.textContent='左侧封面可拖动；右下角可缩放。在歌词区滚动鼠标滚轮可回看前后歌词，停止滚动约 4 秒后回到当前句，点击歌词可跳转。开启鼠标穿透后，可在 MiniLyrics 设置中点击“退出鼠标穿透”恢复操作；右键小窗可切换翻译与帧率。默认 60 FPS，也可选择 30 FPS。';el.append(p);
     const heading=document.createElement('h3');heading.textContent='背景';el.append(heading);
     const makeSelect=(id,choices,value)=>{const control=document.createElement('select');control.id=id;control.style.cssText='padding:5px 8px;margin-left:12px';for(const [v,text]of choices){const option=document.createElement('option');option.value=String(v);option.textContent=text;control.append(option);}control.value=String(value);return control;};
     const addRow=(text,control)=>{const row=document.createElement('label');row.style.cssText='display:block;margin:10px 0';const label=document.createElement('span');label.textContent=text;row.append(label,control);el.append(row);};
     const mode=makeSelect('miniLyrics-background-mode',[[0,'现有渐变'],[1,'Lyricify · 标准'],[2,'Lyricify · 明显流动'],[3,'Lyricify · 暗色']],background.mode);
     const animated=document.createElement('input');animated.id='miniLyrics-background-animated';animated.type='checkbox';animated.checked=background.animated;animated.style.marginLeft='12px';
     const speed=makeSelect('miniLyrics-background-speed',[[.5,'慢速'],[1,'标准'],[2,'快速']],background.speed);
-    const rate=makeSelect('miniLyrics-background-fps',[[10,'10 FPS'],[15,'15 FPS'],[30,'30 FPS（默认）'],[45,'45 FPS'],[60,'60 FPS']],background.fps);
+    const rate=makeSelect('miniLyrics-background-fps',[[10,'10 FPS'],[15,'15 FPS'],[30,'30 FPS'],[45,'45 FPS'],[60,'60 FPS（默认）']],background.fps);
     const refreshControls=()=>{animated.disabled=background.mode===0;speed.disabled=rate.disabled=background.mode===0||!background.animated;};
     mode.onchange=()=>{changeBackground({mode:Number(mode.value)});refreshControls();};
     animated.onchange=()=>{changeBackground({animated:animated.checked});refreshControls();};
     speed.onchange=()=>changeBackground({speed:Number(speed.value)});rate.onchange=()=>changeBackground({fps:Number(rate.value)});
     addRow('背景样式',mode);addRow('动态流动',animated);addRow('流动速度',speed);addRow('背景帧率',rate);refreshControls();
-    const tip=document.createElement('p');tip.textContent='Lyricify 背景使用封面旋转、模糊和网格形变。背景默认 30 FPS，可选 10 / 15 / 30 / 45 / 60 FPS，独立于歌词帧率。播放时流动，暂停时冻结；调整窗口大小时暂时保持当前背景，松手后更新。关闭“动态流动”可保留静态效果。设置自动保存。';el.append(tip);
+    const tip=document.createElement('p');tip.textContent='Lyricify 背景使用封面旋转、模糊和网格形变。背景默认 60 FPS，可选 10 / 15 / 30 / 45 / 60 FPS，独立于歌词帧率。播放时流动，暂停时冻结；调整窗口大小时暂时保持当前背景，松手后更新。关闭“动态流动”可保留静态效果。设置自动保存。';el.append(tip);
     const links=document.createElement('p');
     for(const [label,url]of [['源码与许可证','https://github.com/shoebillback/MiniLyrics'],['反馈问题','https://github.com/shoebillback/MiniLyrics/issues']]){
       const link=document.createElement('a');link.textContent=label;link.href=url;link.style.cssText='margin-right:18px';

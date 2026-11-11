@@ -3,7 +3,7 @@ const {fixture}=require('./bridge-fixture.cjs');
 const plain=value=>JSON.parse(JSON.stringify(value));
 function controls(f){const all=[];const walk=n=>{all.push(n);for(const c of n.children??[])walk(c);};walk(f.config());return Object.fromEntries(all.filter(n=>n.id).map(n=>[n.id.replace('miniLyrics-background-',''),n]));}
 test('background defaults enable the native Lyricify background and are sent on connection',async()=>{
- const f=fixture();try{await f.open();assert.deepEqual(f.sent.find(m=>m.type==='background'),{type:'background',mode:1,animated:true,speed:1,fps:30});const c=controls(f);assert.deepEqual(c.fps.children.map(n=>n.value),['10','15','30','45','60']);assert.equal(c.mode.children.length,4);assert.equal(c.animated.disabled,false);assert.equal(c.speed.disabled,false);}finally{f.dispose();}
+ const f=fixture();try{await f.open();assert.deepEqual(f.sent.find(m=>m.type==='background'),{type:'background',mode:1,animated:true,speed:1,fps:60});const c=controls(f);assert.deepEqual(c.fps.children.map(n=>n.value),['10','15','30','45','60']);assert.equal(c.mode.children.length,4);assert.equal(c.animated.disabled,false);assert.equal(c.speed.disabled,false);}finally{f.dispose();}
 });
 test('configuration page saves all four background controls before opening the widget',async()=>{
  const f=fixture();try{const c=controls(f);c.mode.value='2';c.mode.onchange();assert.equal(c.animated.disabled,false);assert.equal(c.speed.disabled,false);c.speed.value='2';c.speed.onchange();c.fps.value='45';c.fps.onchange();assert.equal(f.savedConfig.background.fps,45);c.fps.value='60';c.fps.onchange();c.animated.checked=false;c.animated.onchange();assert.equal(c.speed.disabled,true);assert.equal(c.fps.disabled,true);
@@ -18,7 +18,7 @@ test('live background changes apply immediately and survive reconnect and reload
  const restored=fixture({config:saved});try{const c=controls(restored);assert.equal(c.mode.value,'3');assert.equal(c.speed.value,'0.5');assert.equal(c.fps.value,'10');assert.equal(c.animated.checked,true);}finally{restored.dispose();}
 });
 test('malformed background settings fall back to supported choices',()=>{
- const f=fixture({config:{background:{mode:99,animated:'false',speed:Infinity,fps:1}}});try{assert.deepEqual(plain(f.diagnostics().background),{mode:1,animated:true,speed:1,fps:30});}finally{f.dispose();}
+ const f=fixture({config:{background:{mode:99,animated:'false',speed:Infinity,fps:1}}});try{assert.deepEqual(plain(f.diagnostics().background),{mode:1,animated:true,speed:1,fps:60});}finally{f.dispose();}
 });
 test('upgrade selects Lyricify once and preserves subsequent user choices',()=>{
  const old=fixture({config:{background:{mode:0,animated:false,speed:2,fps:10}}});let saved;

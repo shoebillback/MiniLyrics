@@ -131,11 +131,11 @@ class App {
  bool seekPending=false;uint64_t seekSerial=0,seekRequest=0;double seekStarted=0,seekFallback=0;
  std::wstring settingsPath,capturePath,title=L"MiniLyrics",artist,coverUrl;std::string songId,error;
  double position=0,anchor=0,duration=0,offset=0,received=0,revision=0,rowSince=-1000,coverSince=-1000;
- double savedX=80,savedY=80,savedWidth=460,savedHeight=130;float dpi=96,width=460,height=130,artSize=96,textX=124;
+ double savedX=80,savedY=80,savedWidth=360,savedHeight=130;float dpi=96,width=360,height=130,artSize=96,textX=124;
  bool positionInPixels=false;
  SIZE geometryPixels{};float geometryDpi=0;
  bool playing=false,valid=false,through=false,top=true,translation=true,hover=false,dragProgress=false,resizing=false,closing=false,hardware=false,frameRunning=false;
- bool demo=false,renderVisible=false;int fps=30,index=-999;UINT intervalMs=200;uint64_t renderCalls=0,lineBuildCalls=0,coverEpoch=0;double dragRatio=0;
+ bool demo=false,renderVisible=false;int fps=60,index=-999;UINT intervalMs=200;uint64_t renderCalls=0,lineBuildCalls=0,coverEpoch=0;double dragRatio=0;
  POINT resizeStart{};SIZE resizeSize{};
  double current()const{return position+(playing&&valid&&!freezePlayback?std::max(0.,nowMs()-anchor):0.);}
  double animationWall()const{return testWall?testWallMs:nowMs();}
@@ -510,7 +510,7 @@ class App {
   else if(type=="background"){if(readBackground(m)){save();update();}report("background-state");}
   else if(type=="show"){ShowWindow(hwnd,SW_SHOWNOACTIVATE);constrain();}
   else if(type=="unlock"){setThrough(false);update();}
-  else if(type=="reset"){setThrough(false);SetWindowPos(hwnd,nullptr,int(80*scale()),int(80*scale()),int(460*scale()),int(130*scale()),SWP_NOZORDER|SWP_NOACTIVATE);ShowWindow(hwnd,SW_SHOWNOACTIVATE);save();update();}
+  else if(type=="reset"){setThrough(false);SetWindowPos(hwnd,nullptr,int(80*scale()),int(80*scale()),int(360*scale()),int(130*scale()),SWP_NOZORDER|SWP_NOACTIVATE);ShowWindow(hwnd,SW_SHOWNOACTIVATE);save();update();}
   else if(type=="exit")DestroyWindow(hwnd);
   else if(type=="capture")capture();
   else if(type=="test-wheel"&&!capturePath.empty()){POINT p{int(std::round(m["x"].n()*scale())),int(std::round(m["y"].n()*scale()))};ClientToScreen(hwnd,&p);message(WM_MOUSEWHEEL,MAKEWPARAM(0,SHORT(clamp(m["delta"].n(),-12000,12000))),MAKELPARAM(p.x,p.y));report("test-wheel-ack",true,true);}
@@ -575,7 +575,7 @@ class App {
  static LRESULT CALLBACK procedure(HWND window,UINT msg,WPARAM wp,LPARAM lp){App*app=reinterpret_cast<App*>(GetWindowLongPtrW(window,GWLP_USERDATA));if(msg==WM_NCCREATE){app=static_cast<App*>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams);app->hwnd=window;SetWindowLongPtrW(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(app));}if(app){try{return app->message(msg,wp,lp);}catch(...){app->error="window-message-failed";}}return DefWindowProcW(window,msg,wp,lp);}
  public:
  App(){settingsPath=env(L"MINILYRICS_SETTINGS");if(settingsPath.empty())settingsPath=env(L"LOCALAPPDATA")+L"\\MiniLyrics\\settings.json";
-  try{std::ifstream f(std::filesystem::path(settingsPath),std::ios::binary);std::string bytes((std::istreambuf_iterator<char>(f)),{});if(bytes.size()>65536)throw std::runtime_error("settings size");auto settings=JsonParser(bytes).parse();savedX=settings["X"].n(80);savedY=settings["Y"].n(80);positionInPixels=settings["PositionInPixels"].b();savedWidth=clamp(settings["Width"].n(460),360,900);savedHeight=clamp(settings["Height"].n(130),MinWindowHeight,240);top=settings["Top"].b(true);translation=settings["Translation"].b(true);fps=settings["Fps"].n(30)==60?60:30;readBackground(settings["Background"]);}catch(...){}
+  try{std::ifstream f(std::filesystem::path(settingsPath),std::ios::binary);std::string bytes((std::istreambuf_iterator<char>(f)),{});if(bytes.size()>65536)throw std::runtime_error("settings size");auto settings=JsonParser(bytes).parse();savedX=settings["X"].n(80);savedY=settings["Y"].n(80);positionInPixels=settings["PositionInPixels"].b();savedWidth=clamp(settings["Width"].n(360),360,900);savedHeight=clamp(settings["Height"].n(130),MinWindowHeight,240);top=settings["Top"].b(true);translation=settings["Translation"].b(true);fps=settings["Fps"].n(60)==60?60:30;readBackground(settings["Background"]);}catch(...){}
  }
  int run(HINSTANCE instance,int port,const std::string&token,const std::wstring&captureFile,bool demoMode){
   capturePath=captureFile;demo=demoMode;check(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,factory.put()));check(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,__uuidof(IDWriteFactory),reinterpret_cast<IUnknown**>(textFactory.put())));check(CoCreateInstance(CLSID_WICImagingFactory,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(imaging.put())));

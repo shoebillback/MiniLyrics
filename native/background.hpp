@@ -7,11 +7,11 @@
 #include <cmath>
 #include <cstdint>
 struct BackgroundSettings {
- int mode=1;bool animated=true;double speed=1;int fps=30;
+ int mode=1;bool animated=true;double speed=1;int fps=60;
  bool operator==(const BackgroundSettings&o)const{return mode==o.mode&&animated==o.animated&&speed==o.speed&&fps==o.fps;}
 };
 
-inline int backgroundFrameRate(int value){switch(value){case 10:case 15:case 30:case 45:case 60:return value;default:return 30;}}
+inline int backgroundFrameRate(int value){switch(value){case 10:case 15:case 30:case 45:case 60:return value;default:return 60;}}
 
 struct BackgroundClock {
  double elapsed=0,phase=0,anchor=0,speed=1;bool running=false;
@@ -79,7 +79,7 @@ class FluidBackground {
  ColorFieldFallback fallback;
  std::vector<uint8_t>current,previous;
  bool dirty=true,upload=true,failed=false;int lastMode=-1,lastFps=0;int64_t lastBucket=-1;
- double transitionAt=-1000;float viewWidth=460,viewHeight=130;
+ double transitionAt=-1000;float viewWidth=360,viewHeight=130;
  float blend(double elapsed)const{return float(std::max(0.,std::min(1.,(elapsed-transitionAt)/500)));}
  void defaultArtwork(const BackgroundPalette&p){current.resize(192*192*4);for(int y=0;y<192;y++)for(int x=0;x<192;x++){float u=x/191.f,v=y/191.f;int k=(y>=96?2:0)+(x>=96?1:0);auto a=p[k];size_t i=(y*192+x)*4;current[i]=uint8_t(a.b*255);current[i+1]=uint8_t(a.g*255);current[i+2]=uint8_t(a.r*255);current[i+3]=255;}previous=current;upload=true;}
  public:
