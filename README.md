@@ -1,6 +1,6 @@
 # MiniLyrics
 
-Windows 原生桌面歌词小窗，基于 BetterNCM、RefinedNowPlayingNext 与 InfLink-rs。当前版本 **0.6.31**，作者 **shoebillback**。
+Windows 原生桌面歌词小窗，基于 BetterNCM、RefinedNowPlayingNext 与 InfLink-rs。当前版本 **0.6.33**，作者 **shoebillback**。
 
 显示端使用 C++ / Win32 / Direct2D / DirectWrite，JavaScript 负责歌词、播放信息及控制桥接。运行时无需安装 .NET、Node.js 或 WebView2。
 
@@ -65,6 +65,8 @@ powershell -NoProfile -File .\build.ps1 -SkipNativeBuild -OutputDirectory .\dist
 
 ## 当前开发状态
 
-当前源码版本为 0.6.31。MiniLyrics 不再注册或包装网易云全局原生事件入口。小窗发出控制命令后，两边进度条的实际位置都由 InfLink 回报；显示端在更新位置前保留当前画面，接续歌词过渡，不等待额外 Seek 通知。
+当前源码版本为 0.6.33。MiniLyrics 统一解析 InfLink 播放状态与实际进度。明确状态事件立即生效；当状态缓存仍为暂停，而当前曲目的多次进度更新持续按真实时间推进时，纠正过期暂停状态，恢复播放图标及连续歌词动画。单次跳变、小窗跳转确认、切歌及连接变化不建立连续播放证据；进度停止后撤销推断。
 
-20 项定向脚本检查通过，包含严格禁止访问原生注册接口、快速交替跳转、暂停恢复和连接生命周期检查；独立原生重放确认时间轴变化产生实际移动，并覆盖暂停跳转与首次同步。复现源码见 tests/timeline-seek.test.cjs、tests/state-replay.test.cpp 和 tests/state-replay.cjs。此次未运行整套回归，未更新商店；原版进度恢复需完全退出并重新启动网易云后确认，只重开小窗不能清除旧版可能留下的事件入口状态。
+保留 0.6.32 的暂停、断线保留小窗及原窗口重连逻辑。网易云进程检测只读打开所属启动祖先的进程句柄；无法可靠识别时保留窗口。
+
+修复前已在独立环境复现：旧曲目 END 事件污染状态后，进度仍前进，但原生显示端停止连续动画。此结果证明该故障路径存在，尚未证明用户现场一定由同一事件触发。本次修复尚未运行新的测试，未安装或发布商店。

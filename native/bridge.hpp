@@ -16,7 +16,7 @@
 class Bridge {
  std::atomic<SOCKET> listener{INVALID_SOCKET},client{INVALID_SOCKET};
  std::atomic<bool> stopping{false},authenticated{false};std::thread worker;std::mutex writeMutex;
- std::string token;std::function<void(Json)> receive;
+ std::string token;std::function<void(Json)> receive;std::function<void()> disconnected;
  static bool readBytes(SOCKET s,void* p,size_t n){char*b=static_cast<char*>(p);while(n){int r=recv(s,b,int(std::min<size_t>(n,65536)),0);if(r<=0)return false;b+=r;n-=r;}return true;}
  static bool writeBytes(SOCKET s,const void*p,size_t n){const char*b=static_cast<const char*>(p);while(n){int r=::send(s,b,int(std::min<size_t>(n,65536)),0);if(r<=0)return false;b+=r;n-=r;}return true;}
  static void closeSocket(std::atomic<SOCKET>&slot){SOCKET s=slot.exchange(INVALID_SOCKET);if(s!=INVALID_SOCKET){shutdown(s,SD_BOTH);closesocket(s);}}
@@ -66,19 +66,24 @@ class Bridge {
     for(size_t i=0;i<body.size();i++)body[i]=char(static_cast<unsigned char>(body[i])^mask[i%4]);
     if(opcode==8)break;if(opcode==9){if(length>125)break;frame(10,body);continue;}if(opcode!=1)continue;
     try{Json m=JsonParser(body).parse();if(m.kind!=Json::Object)break;
-     if(!authenticated){if(m["type"].s()!="hello"||m["token"].s()!=token)break;authenticated=true;}
+     if(!authenticated){if(m["type"].s()!="hello"||m["token"].s()!=token)break;authenticated=true;
+      // Authenticated silence does not imply that the player has exited.
+      DWORD noTimeout=0;setsockopt(s,SOL_SOCKET,SO_RCVTIMEO,reinterpret_cast<char*>(&noTimeout),sizeof(noTimeout));}
      receive(std::move(m));
     }catch(...){break;}
-   }}authenticated=false;closeSocket(client);
+   }}bool hadSession=authenticated.exchange(false);closeSocket(client);
+   if(hadSession&&!stopping&&disconnected)disconnected();
   }
  }
- public:Bridge(int port,std::string secret,std::function<void(Json)> callback):token(std::move(secret)),receive(std::move(callback)){
+ public:Bridge(int port,std::string secret,std::function<void(Json)> callback,std::function<void()> onDisconnect={}):token(std::move(secret)),receive(std::move(callback)),disconnected(std::move(onDisconnect)){
   SOCKET s=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);if(s==INVALID_SOCKET)throw std::runtime_error("socket failed");listener=s;
   sockaddr_in address{};address.sin_family=AF_INET;address.sin_port=htons(static_cast<unsigned short>(port));address.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
   if(bind(s,reinterpret_cast<sockaddr*>(&address),sizeof(address))==SOCKET_ERROR||listen(s,1)==SOCKET_ERROR){closeSocket(listener);throw std::runtime_error("loopback port unavailable");}
   worker=std::thread([this]{run();});
  }
  void send(const Json&m){if(authenticated)frame(1,m.dump());}
+ bool connected()const{return authenticated.load();}
+ void finish(){if(authenticated)frame(8,std::string("\x03\xe8",2)+"host-closed");}
  void stop(){stopping=true;authenticated=false;closeSocket(client);closeSocket(listener);if(worker.joinable())worker.join();}
  ~Bridge(){stop();}
 };
