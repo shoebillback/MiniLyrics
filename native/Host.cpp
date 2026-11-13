@@ -115,6 +115,7 @@ struct Graphics {
 
 class App {
  friend struct NativeTest;
+ float currentFontSize=::CurrentFontSize,contextFontSize=::ContextFontSize,translationFontSize=::TranslationFontSize;
  static constexpr UINT Incoming=WM_APP+1,CoverReady=WM_APP+2,FrameReady=WM_APP+3;
  HWND hwnd=nullptr;HANDLE frameTimer=nullptr;bool frameArmed=false;double frameDeadline=0,framePeriod=0;std::unique_ptr<Bridge> bridge;
  ModalFrames modalFrames;bool systemMoving=false;
@@ -143,7 +144,7 @@ class App {
  void stopBrowsing(){browseIndex=-1;wheelRemainder=0;browseUntil=0;returnFromBrowse=true;KillTimer(hwnd,4);layoutDirty=true;}
  void finishTransition(){for(auto&item:groups){auto&g=item.second;g.y.snap(g.y.to);g.zoom.snap(g.zoom.to);g.mainAlpha.snap(g.mainAlpha.to);g.subAlpha.snap(g.subAlpha.to);}transitionActive=false;}
  float scale()const{return dpi/96.f;}
- float lyricAnchor()const{return height/2+4-(mainRowHeight*(1+ContextFontSize/CurrentFontSize)+11)/2;}
+ float lyricAnchor()const{return height/2+4-(mainRowHeight*(1+contextFontSize/currentFontSize)+11)/2;}
  enum class LyricView {Waiting,Syncing,Prelude,Rows};
  LyricView lyricView()const{if(lines.empty())return LyricView::Waiting;if(browseIndex>=0)return LyricView::Rows;if(!valid)return LyricView::Syncing;return index<0?LyricView::Prelude:LyricView::Rows;}
  float rowAnchor()const{return lyricAnchor()+(lyricView()==LyricView::Prelude?mainRowHeight+GroupGap:0);}
@@ -167,6 +168,16 @@ class App {
  int rowAt(double time)const {int lo=0,hi=int(lines.size())-1,result=-1;while(lo<=hi){int mid=(lo+hi)/2;if(lines[mid].time<=time){result=mid;lo=mid+1;}else hi=mid-1;}return result;}
  Layout layout(const std::wstring&text,IDWriteTextFormat*format,float maxWidth=50000){Layout l;if(text.empty())return l;check(textFactory->CreateTextLayout(text.c_str(),UINT32(text.size()),format,maxWidth,64,l.value.put()));DWRITE_TEXT_METRICS metrics{};check(l.value->GetMetrics(&metrics));l.width=metrics.widthIncludingTrailingWhitespace;l.height=metrics.height;return l;}
  void makeFormat(Com<IDWriteTextFormat>&format,float size,DWRITE_FONT_WEIGHT weight){check(textFactory->CreateTextFormat(L"Segoe UI",nullptr,weight,DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,size,L"zh-cn",format.put()));format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);}
+ void setLyricFontSize(double value){
+  float size=float(std::round(clamp(value,14,36)));if(size==currentFontSize)return;
+  Com<IDWriteTextFormat> nextMain,nextSecondary;
+  makeFormat(nextMain,size,DWRITE_FONT_WEIGHT_SEMI_BOLD);makeFormat(nextSecondary,::TranslationFontSize*size/::CurrentFontSize,DWRITE_FONT_WEIGHT_NORMAL);
+  mainFormat=std::move(nextMain);secondaryFormat=std::move(nextSecondary);
+  currentFontSize=size;contextFontSize=::ContextFontSize*size/::CurrentFontSize;translationFontSize=::TranslationFontSize*size/::CurrentFontSize;
+  mainRowHeight=layout(L"Ag",mainFormat.get()).height;secondaryRowHeight=0;
+  flight=LyricFlight();groups.clear();focusIndex=-999;transitionActive=false;layoutDirty=true;snapRow=true;
+  placeholder=Layout();syncing=Layout();updatePlaceholders();save();update();
+ }
  void rebuildMeta(){metaLayout=layout(title+(artist.empty()?L"":L"  ·  "+artist),metaFormat.get(),std::max(20.f,width-textX-85));if(metaLayout.value){DWRITE_TRIMMING trim{DWRITE_TRIMMING_GRANULARITY_CHARACTER,0,0};Com<IDWriteInlineObject>sign;if(SUCCEEDED(textFactory->CreateEllipsisTrimmingSign(metaFormat.get(),sign.put())))metaLayout.value->SetTrimming(&trim,sign.get());}}
  LyricGroup& group(int at){
   auto result=groups.try_emplace(at);auto&g=result.first->second;const auto&line=lines[at];
@@ -181,7 +192,7 @@ class App {
   if(g.translated)g.subtitle=layout(line.translation,secondaryFormat.get());
   g.mainAlpha.snap(at==index?1.f:.4f);g.subAlpha.snap(at==index?.8f:.4f);g.active=at==index;lineBuildCalls++;return g;
  }
- float groupScale(int at,int focus){return at==focus&&lyricView()!=LyricView::Prelude?1.f:ContextFontSize/CurrentFontSize;}
+ float groupScale(int at,int focus){return at==focus&&lyricView()!=LyricView::Prelude?1.f:contextFontSize/currentFontSize;}
  int layoutDistance(int at,int focus,int limit)const{
   if(at<0||focus<0||at>=int(lines.size())||focus>=int(lines.size()))return limit;int distance=0;
   auto bounds=browseIndex>=0?browseBounds():std::make_pair(-1,-1);for(int n=std::min(at,focus);n<std::max(at,focus);n++)if((browseIndex<0||(n>=bounds.first&&n<=bounds.second))&&++distance>=limit)break;return distance;
@@ -205,7 +216,7 @@ class App {
   if(lines.empty()||focusIndex<0)return;if(playbackIndex<0&&preludePreview>=0)desired=preludePreview;desired=std::max(0,std::min(int(lines.size())-1,desired));double now=animationWall(),motionTime=motionNow();bool sourcePrelude=flight.rows.empty()&&lyricView()==LyricView::Prelude,sourceBrowse=browseIndex>=0;int sourceFocus=std::max(0,std::min(int(lines.size())-1,focusIndex));
   for(int i=std::max(0,desired-6);i<=std::min(int(lines.size())-1,desired+6);i++)group(i);
   if(secondaryRowHeight<=0)secondaryRowHeight=layout(L"Ag",secondaryFormat.get()).height;
-  std::vector<float> heights(lines.size()),prefix(lines.size()+1),sourcePrefix(lines.size()+1);auto bounds=sourceBrowse?browseBounds():std::make_pair(-1,-1);float context=ContextFontSize/CurrentFontSize;
+  std::vector<float> heights(lines.size()),prefix(lines.size()+1),sourcePrefix(lines.size()+1);auto bounds=sourceBrowse?browseBounds():std::make_pair(-1,-1);float context=contextFontSize/currentFontSize;
   for(size_t i=0;i<lines.size();i++){auto found=groups.find(int(i));heights[i]=found!=groups.end()&&found->second.model==lines[i]?found->second.renderedHeight(1):mainRowHeight+(translation&&!lines[i].translation.empty()?TranslationGap+secondaryRowHeight:0);float step=heights[i]*context+GroupGap;prefix[i+1]=prefix[i]+step;sourcePrefix[i+1]=sourcePrefix[i]+(!sourceBrowse||(int(i)>=bounds.first&&int(i)<=bounds.second)?step:0);}
   auto previous=std::move(flight);auto previousPhase=previous.phase(now);flight=LyricFlight();flight.rows.resize(lines.size());flight.started=now;flight.focus=desired;flight.playbackIndex=playbackIndex;flight.curve=lineCurve;flight.stagger=stagger&&desired!=sourceFocus;flight.prelude=playbackIndex<0;int direction=desired>=sourceFocus?1:-1;
   float destinationAnchor=lyricAnchor()+(flight.prelude?mainRowHeight+GroupGap:0),sourceAnchor=layoutAnchor;
@@ -307,7 +318,7 @@ class App {
  }
  void drawInterlude(Graphics&g,const InterludeAnimation&animation,float x,float y,double time,double start,double duration,float opacity=1,bool stationary=false){
   float alpha=opacity*(stationary?1.f:animation.opacity.value(motionNow()));if(alpha<=0)return;
-  float breath=stationary?1.f:animation.scale(motionNow()),diameter=CurrentFontSize*.7f,gap=CurrentFontSize*.5f;
+  float breath=stationary?1.f:animation.scale(motionNow()),diameter=currentFontSize*.7f,gap=currentFontSize*.5f;
   g.brush->SetColor(D2D1::ColorF(D2D1::ColorF::White));
   for(int i=0;i<3;i++){auto dot=stationary?InterludeDot{.4f,.9f}:animation.dot(time,start,duration,i,motionNow());float radius=diameter*.5f*dot.scale*breath;g.brush->SetOpacity(alpha*dot.alpha);g.target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x+(diameter*.5f+i*(diameter+gap))*breath,y+mainRowHeight*.5f),radius,radius),g.brush.get());}
   g.brush->SetOpacity(1);
@@ -464,8 +475,8 @@ class App {
   j["backgroundBackend"]=fluid.backend();j["backgroundGpuReady"]=fluid.gpuReady();if(!fluid.gpuError.empty())j["backgroundGpuError"]=fluid.gpuError;
   if(type=="background-state")j["background"]=backgroundState();return j;
  }
- Json diagnostics(const std::string&type,bool accepted=true){Json j=state(type,accepted);j["currentLineIndex"]=index;j["index"]=index;j["frameRunning"]=frameRunning;j["intervalMs"]=int(intervalMs);j["renderCalls"]=double(renderCalls);j["lineBuildCalls"]=double(lineBuildCalls);j["backend"]="Direct2D/DirectWrite";j["hardware"]=hardware;j["renderVisible"]=renderVisible;j["through"]=through;j["top"]=top;j["windowTopmost"]=(GetWindowLongPtrW(hwnd,GWL_EXSTYLE)&WS_EX_TOPMOST)!=0;j["windowNoActivate"]=(GetWindowLongPtrW(hwnd,GWL_EXSTYLE)&WS_EX_NOACTIVATE)!=0;j["fps"]=fps;j["systemMoving"]=systemMoving;j["frameScheduler"]=frameTimer&&(!systemMoving||modalFrames.active())?(systemMoving?"waitable-posted":"waitable-deadline"):"window-timer";j["coverLoaded"]=!cover.pixels.empty();j["dpi"]=double(dpi);j["coverLeftPx"]=std::round(artBounds.left*scale());j["coverTopPx"]=std::round(artBounds.top*scale());j["coverSidePx"]=std::round(artSize*scale());j["coverRadiusPx"]=std::round(artRadius*scale());j["windowHeightPx"]=std::round(height*scale());j["iconBackend"]="vector";j["windowWidthPx"]=std::round(width*scale());j["barLeftPx"]=transport.left*scale();j["barRightPx"]=transport.right*scale();j["controlYPx"]=transport.y*scale();j["previousPx"]=transport.previous*scale();j["playPx"]=transport.play*scale();j["nextPx"]=transport.next*scale();j["rowStartedMs"]=rowSince;j["focusIndex"]=focusIndex;j["browsing"]=browseIndex>=0;j["browseIndex"]=browseIndex;j["browseRemainingMs"]=browseIndex>=0?std::max(0.,browseUntil-animationWall()):0;j["groupCacheLimit"]=32;j["transitionActive"]=transitionActive;j["transitionProgress"]=unit((motionNow()-rowSince-200)/500);j["transitionMode"]=transitionActive?"group-scroll":"none";j["animationTimeMs"]=motionNow();j["retainedRows"]=int(groups.size());j["layoutChanges"]=double(layoutChanges);j["lookaheadMs"]=stagger?200:0;j["stagger"]=stagger;j["curve"]=lineCurve;j["viewportTop"]=viewportTop;j["viewportBottom"]=viewportBottom;j["groupGap"]=GroupGap;j["layoutAnchor"]=layoutAnchor;j["groups"].kind=Json::Array;
-  for(const auto&item:groups){const auto&g=item.second;Json v=Json::obj();v["index"]=item.first;v["identity"]=double(g.identity);v["text"]=narrow(g.model.text);v["translation"]=g.translated?narrow(g.model.translation):"";v["top"]=g.y.value(motionNow());v["target"]=g.y.to;v["startAt"]=g.y.start;v["durationMs"]=g.y.duration;v["height"]=g.renderedHeight(1.f);v["scale"]=g.zoom.value(motionNow());v["scaleTarget"]=g.zoom.to;v["scaleStartAt"]=g.zoom.start;v["scaleDurationMs"]=g.zoom.duration;v["renderedHeight"]=g.renderedHeight(g.zoom.value(motionNow()));v["fontSize"]=CurrentFontSize*g.zoom.value(motionNow());v["translationFontSize"]=g.translated?TranslationFontSize*g.zoom.value(motionNow()):0.f;v["rendered"]=groupVisible(g,motionNow());v["mainHeight"]=g.mainHeight;v["subOffset"]=g.subtitleOffset(g.zoom.value(motionNow()));v["mainAlpha"]=g.mainAlpha.value(motionNow());v["subAlpha"]=g.subAlpha.value(motionNow());v["active"]=g.active;j["groups"].array.push_back(std::move(v));}
+ Json diagnostics(const std::string&type,bool accepted=true){Json j=state(type,accepted);j["currentLineIndex"]=index;j["index"]=index;j["frameRunning"]=frameRunning;j["intervalMs"]=int(intervalMs);j["renderCalls"]=double(renderCalls);j["lineBuildCalls"]=double(lineBuildCalls);j["backend"]="Direct2D/DirectWrite";j["hardware"]=hardware;j["renderVisible"]=renderVisible;j["through"]=through;j["top"]=top;j["windowTopmost"]=(GetWindowLongPtrW(hwnd,GWL_EXSTYLE)&WS_EX_TOPMOST)!=0;j["windowNoActivate"]=(GetWindowLongPtrW(hwnd,GWL_EXSTYLE)&WS_EX_NOACTIVATE)!=0;j["fps"]=fps;j["fontSize"]=currentFontSize;j["systemMoving"]=systemMoving;j["frameScheduler"]=frameTimer&&(!systemMoving||modalFrames.active())?(systemMoving?"waitable-posted":"waitable-deadline"):"window-timer";j["coverLoaded"]=!cover.pixels.empty();j["dpi"]=double(dpi);j["coverLeftPx"]=std::round(artBounds.left*scale());j["coverTopPx"]=std::round(artBounds.top*scale());j["coverSidePx"]=std::round(artSize*scale());j["coverRadiusPx"]=std::round(artRadius*scale());j["windowHeightPx"]=std::round(height*scale());j["iconBackend"]="vector";j["windowWidthPx"]=std::round(width*scale());j["barLeftPx"]=transport.left*scale();j["barRightPx"]=transport.right*scale();j["controlYPx"]=transport.y*scale();j["previousPx"]=transport.previous*scale();j["playPx"]=transport.play*scale();j["nextPx"]=transport.next*scale();j["rowStartedMs"]=rowSince;j["focusIndex"]=focusIndex;j["browsing"]=browseIndex>=0;j["browseIndex"]=browseIndex;j["browseRemainingMs"]=browseIndex>=0?std::max(0.,browseUntil-animationWall()):0;j["groupCacheLimit"]=32;j["transitionActive"]=transitionActive;j["transitionProgress"]=unit((motionNow()-rowSince-200)/500);j["transitionMode"]=transitionActive?"group-scroll":"none";j["animationTimeMs"]=motionNow();j["retainedRows"]=int(groups.size());j["layoutChanges"]=double(layoutChanges);j["lookaheadMs"]=stagger?200:0;j["stagger"]=stagger;j["curve"]=lineCurve;j["viewportTop"]=viewportTop;j["viewportBottom"]=viewportBottom;j["groupGap"]=GroupGap;j["layoutAnchor"]=layoutAnchor;j["groups"].kind=Json::Array;
+  for(const auto&item:groups){const auto&g=item.second;Json v=Json::obj();v["index"]=item.first;v["identity"]=double(g.identity);v["text"]=narrow(g.model.text);v["translation"]=g.translated?narrow(g.model.translation):"";v["top"]=g.y.value(motionNow());v["target"]=g.y.to;v["startAt"]=g.y.start;v["durationMs"]=g.y.duration;v["height"]=g.renderedHeight(1.f);v["scale"]=g.zoom.value(motionNow());v["scaleTarget"]=g.zoom.to;v["scaleStartAt"]=g.zoom.start;v["scaleDurationMs"]=g.zoom.duration;v["renderedHeight"]=g.renderedHeight(g.zoom.value(motionNow()));v["fontSize"]=currentFontSize*g.zoom.value(motionNow());v["translationFontSize"]=g.translated?translationFontSize*g.zoom.value(motionNow()):0.f;v["rendered"]=groupVisible(g,motionNow());v["mainHeight"]=g.mainHeight;v["subOffset"]=g.subtitleOffset(g.zoom.value(motionNow()));v["mainAlpha"]=g.mainAlpha.value(motionNow());v["subAlpha"]=g.subAlpha.value(motionNow());v["active"]=g.active;j["groups"].array.push_back(std::move(v));}
   j["seekFlight"]=!flight.rows.empty();if(!flight.rows.empty()){j["transitionMode"]="seek-flight";j["transitionActive"]=true;j["transitionProgress"]=unit((animationWall()-flight.started)/(500+(flight.stagger?400:0)));}j["background"]=backgroundState();j["backgroundAnimating"]=backgroundAnimating();j["backgroundFrameBuilds"]=double(fluid.revision);j["backgroundBackend"]=fluid.backend();j["backgroundGpuReady"]=fluid.gpuReady();j["backgroundGpuError"]=fluid.gpuError;j["backgroundTimeMs"]=backgroundClock.time(animationWall());j["first"]=index>=0&&index<int(lines.size())?narrow(lines[index].text):"";j["second"]=index>=0&&index<int(lines.size())?(translation&&!lines[index].translation.empty()?narrow(lines[index].translation):index+1<int(lines.size())?narrow(lines[index+1].text):""):"";return j;}
  void report(const std::string&type,bool accepted=true,bool detailed=false){if(bridge)bridge->send(detailed?diagnostics(type,accepted):state(type,accepted));}
  void command(const std::string&action,double pos=0){if(!bridge)return;Json j=Json::obj();j["type"]="command";j["action"]=action;j["position"]=pos;if(action=="seek"){j["requestId"]=double(seekRequest);j["songId"]=songId;}bridge->send(j);}
@@ -473,8 +484,8 @@ class App {
  void requestSeek(double target){
   if(!bridge)return;
   if(!seekPending)seekFallback=current();seekStarted=nowMs();seekRequest=++seekSerial;seekPending=true;
-  seekTo(target);SetTimer(hwnd,3,3500,nullptr);
-  command("seek",position);
+  SetTimer(hwnd,3,3500,nullptr);
+  command("seek",target);
  }
  void startCoverWorker(){
   coverQueue=std::make_shared<CoverQueue>();auto queue=coverQueue;HWND window=hwnd;
@@ -499,6 +510,10 @@ class App {
    if(next!=lines){bool same=index>=0&&index<int(lines.size())&&index<int(next.size())&&lines[index].time==next[index].time&&lines[index].text==next[index].text;
     flight=LyricFlight();lines=std::move(next);layoutDirty=true;if(!same)snapRow=true;updatePlaceholders();}
    revision=m["revision"].n();error.clear();update();report("lyrics-ack");
+  }else if(type=="seek"){
+   if(m["songId"].s()!=songId||m["position"].kind!=Json::Number||!std::isfinite(m["position"].n())||m["position"].n()<0)return;
+   auto request=uint64_t(m["requestId"].n());if(request&&request!=seekRequest)return;
+   if(!request){cancelSeek();seekRequest=0;}seekTo(m["position"].n());update();report("host-state");
   }else if(type=="clock"){
    if(m["songId"].kind==Json::String&&m["songId"].s()!=songId)return;
    if(seekRequest&&uint64_t(m["seekRequest"].n())!=seekRequest)return;
@@ -507,6 +522,7 @@ class App {
    double incoming=std::max(0.,m["position"].n());if(valid&&std::abs(incoming-current())>1500&&flight.rows.empty())snapRow=true;
    position=incoming;anchor=nowMs();playing=m["playing"].b();valid=m["valid"].b();offset=m["offset"].n();if(m["duration"].n()>0)duration=m["duration"].n();update();report("host-state");}
   else if(type=="style"){int curve=int(clamp(m["curve"].n(),0,3));bool wave=m["stagger"].b(true);if(curve!=lineCurve||wave!=stagger){lineCurve=curve;stagger=wave;layoutDirty=true;update();}}
+  else if(type=="font"){if(m["size"].kind==Json::Number)setLyricFontSize(m["size"].n());report("host-state");}
   else if(type=="background"){if(readBackground(m)){save();update();}report("background-state");}
   else if(type=="show"){ShowWindow(hwnd,SW_SHOWNOACTIVATE);constrain();}
   else if(type=="unlock"){setThrough(false);update();}
@@ -531,7 +547,7 @@ class App {
  void setTop(bool value){if(setWindowTopmost(hwnd,value,through))top=value;else error="topmost-change-failed";}
  void setThrough(bool value){through=value;LONG_PTR style=GetWindowLongPtrW(hwnd,GWL_EXSTYLE);if(value)style|=WS_EX_TRANSPARENT|WS_EX_LAYERED;else style&=~(WS_EX_TRANSPARENT|WS_EX_LAYERED);SetWindowLongPtrW(hwnd,GWL_EXSTYLE,style);if(!applyWindowActivationMode(hwnd,top,through))error="activation-mode-failed";if(value)SetLayeredWindowAttributes(hwnd,0,255,LWA_ALPHA);hover=false;}
  void constrain(){RECT rect{};GetWindowRect(hwnd,&rect);if(!MonitorFromRect(&rect,MONITOR_DEFAULTTONULL))SetWindowPos(hwnd,nullptr,int(80*scale()),int(80*scale()),0,0,SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE);}
- void save(){if(!hwnd)return;RECT rect{};GetWindowRect(hwnd,&rect);Json j=Json::obj();j["X"]=int(rect.left);j["Y"]=int(rect.top);j["PositionInPixels"]=true;j["Width"]=(rect.right-rect.left)/scale();j["Height"]=(rect.bottom-rect.top)/scale();j["Top"]=top;j["Translation"]=translation;j["Fps"]=fps;j["Background"]=backgroundState();try{auto path=std::filesystem::path(settingsPath);std::filesystem::create_directories(path.parent_path());std::ofstream file(path,std::ios::binary);file<<j.dump();}catch(...){}}
+ void save(){if(!hwnd)return;RECT rect{};GetWindowRect(hwnd,&rect);Json j=Json::obj();j["X"]=int(rect.left);j["Y"]=int(rect.top);j["PositionInPixels"]=true;j["Width"]=(rect.right-rect.left)/scale();j["Height"]=(rect.bottom-rect.top)/scale();j["Top"]=top;j["Translation"]=translation;j["Fps"]=fps;j["FontSize"]=currentFontSize;j["Background"]=backgroundState();try{auto path=std::filesystem::path(settingsPath);std::filesystem::create_directories(path.parent_path());std::ofstream file(path,std::ios::binary);file<<j.dump();}catch(...){}}
  void menu(POINT point){HMENU menu=CreatePopupMenu();AppendMenuW(menu,MF_STRING|(translation?MF_CHECKED:0),1,L"显示翻译");AppendMenuW(menu,MF_STRING|(top?MF_CHECKED:0),2,L"置顶");AppendMenuW(menu,MF_STRING|(through?MF_CHECKED:0),3,L"鼠标穿透（在插件设置中恢复）");AppendMenuW(menu,MF_STRING|(fps==30?MF_CHECKED:0),4,L"30 FPS");AppendMenuW(menu,MF_STRING|(fps==60?MF_CHECKED:0),5,L"60 FPS");AppendMenuW(menu,MF_STRING,6,L"关闭小窗");SetForegroundWindow(hwnd);int choice=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,point.x,point.y,0,hwnd,nullptr);DestroyMenu(menu);if(choice==1){translation=!translation;layoutDirty=true;}else if(choice==2)setTop(!top);else if(choice==3)setThrough(!through);else if(choice==4)fps=30;else if(choice==5)fps=60;else if(choice==6){DestroyWindow(hwnd);return;}save();update();}
  LRESULT message(UINT msg,WPARAM wp,LPARAM lp){
   switch(msg){
@@ -575,11 +591,11 @@ class App {
  static LRESULT CALLBACK procedure(HWND window,UINT msg,WPARAM wp,LPARAM lp){App*app=reinterpret_cast<App*>(GetWindowLongPtrW(window,GWLP_USERDATA));if(msg==WM_NCCREATE){app=static_cast<App*>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams);app->hwnd=window;SetWindowLongPtrW(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(app));}if(app){try{return app->message(msg,wp,lp);}catch(...){app->error="window-message-failed";}}return DefWindowProcW(window,msg,wp,lp);}
  public:
  App(){settingsPath=env(L"MINILYRICS_SETTINGS");if(settingsPath.empty())settingsPath=env(L"LOCALAPPDATA")+L"\\MiniLyrics\\settings.json";
-  try{std::ifstream f(std::filesystem::path(settingsPath),std::ios::binary);std::string bytes((std::istreambuf_iterator<char>(f)),{});if(bytes.size()>65536)throw std::runtime_error("settings size");auto settings=JsonParser(bytes).parse();savedX=settings["X"].n(80);savedY=settings["Y"].n(80);positionInPixels=settings["PositionInPixels"].b();savedWidth=clamp(settings["Width"].n(360),360,900);savedHeight=clamp(settings["Height"].n(130),MinWindowHeight,240);top=settings["Top"].b(true);translation=settings["Translation"].b(true);fps=settings["Fps"].n(60)==60?60:30;readBackground(settings["Background"]);}catch(...){}
+  try{std::ifstream f(std::filesystem::path(settingsPath),std::ios::binary);std::string bytes((std::istreambuf_iterator<char>(f)),{});if(bytes.size()>65536)throw std::runtime_error("settings size");auto settings=JsonParser(bytes).parse();savedX=settings["X"].n(80);savedY=settings["Y"].n(80);positionInPixels=settings["PositionInPixels"].b();savedWidth=clamp(settings["Width"].n(360),360,900);savedHeight=clamp(settings["Height"].n(130),MinWindowHeight,240);top=settings["Top"].b(true);translation=settings["Translation"].b(true);fps=settings["Fps"].n(60)==60?60:30;readBackground(settings["Background"]);currentFontSize=float(std::round(clamp(settings["FontSize"].n(::CurrentFontSize),14,36)));contextFontSize=::ContextFontSize*currentFontSize/::CurrentFontSize;translationFontSize=::TranslationFontSize*currentFontSize/::CurrentFontSize;}catch(...){}
  }
  int run(HINSTANCE instance,int port,const std::string&token,const std::wstring&captureFile,bool demoMode){
   capturePath=captureFile;demo=demoMode;check(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,factory.put()));check(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,__uuidof(IDWriteFactory),reinterpret_cast<IUnknown**>(textFactory.put())));check(CoCreateInstance(CLSID_WICImagingFactory,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(imaging.put())));
-  makeFormat(mainFormat,CurrentFontSize,DWRITE_FONT_WEIGHT_SEMI_BOLD);makeFormat(secondaryFormat,TranslationFontSize,DWRITE_FONT_WEIGHT_NORMAL);makeFormat(metaFormat,11.5,DWRITE_FONT_WEIGHT_NORMAL);mainRowHeight=layout(L"Ag",mainFormat.get()).height;updatePlaceholders();
+  makeFormat(mainFormat,currentFontSize,DWRITE_FONT_WEIGHT_SEMI_BOLD);makeFormat(secondaryFormat,translationFontSize,DWRITE_FONT_WEIGHT_NORMAL);makeFormat(metaFormat,11.5,DWRITE_FONT_WEIGHT_NORMAL);mainRowHeight=layout(L"Ag",mainFormat.get()).height;updatePlaceholders();
   check(factory->CreatePathGeometry(playGeometry.put()));Com<ID2D1GeometrySink> sink;check(playGeometry->Open(sink.put()));sink->BeginFigure(D2D1::Point2F(-5,-7),D2D1_FIGURE_BEGIN_FILLED);sink->AddLine(D2D1::Point2F(-5,7));sink->AddLine(D2D1::Point2F(6,0));sink->EndFigure(D2D1_FIGURE_END_CLOSED);check(sink->Close());
   frameTimer=CreateWaitableTimerExW(nullptr,nullptr,0x00000002,TIMER_MODIFY_STATE|SYNCHRONIZE);if(!frameTimer)frameTimer=CreateWaitableTimerW(nullptr,FALSE,nullptr);
   WNDCLASSEXW cls{};cls.cbSize=sizeof(cls);cls.style=CS_DBLCLKS;cls.lpfnWndProc=procedure;cls.hInstance=instance;cls.hCursor=LoadCursorW(nullptr,IDC_ARROW);cls.lpszClassName=L"MiniLyrics.Direct2D";RegisterClassExW(&cls);

@@ -202,7 +202,38 @@ struct NativeTest {
   Fixture longGap;auto&l=longGap.a;for(int i=0;i<1002;i++){Line line;line.time=i*1000;line.duration=1000;line.isInterlude=i>0&&i<1001;if(!line.isInterlude)line.text=L"Visible lyric";l.lines.push_back(line);}l.position=500;l.index=0;l.valid=true;l.playing=true;longGap.layout(0);longGap.wheel(-120);require(l.browseIndex==1,"long middle gap is browsed through placeholder rows");const auto&first=l.group(0);const auto&last=l.group(1);require(l.groups.size()<=32&&l.lineBuildCalls<32,"long interlude run keeps text cache and layout construction bounded");
   require(l.transitionActive&&last.y.active(l.motionNow()),"moving onto a placeholder retains normal browse animation");for(int t=0;t<=250;t+=25){l.testWallMs=1000+t;expectNear(last.y.value(l.motionNow())-first.y.value(l.motionNow())-first.renderedHeight(first.zoom.value(l.motionNow())),7,"placeholder rows retain exact spacing throughout browse animation");}
  }
+ static void fontSizes(const std::filesystem::path&directory){
+  Fixture f;auto&a=f.a;f.lines(2);a.playing=false;f.layout(10);
+  a.settingsPath=(directory/L"font-settings.json").wstring();
+  auto verify=[&](int size){a.setLyricFontSize(size);FLOAT mainSize=0,subSize=0;
+   check(a.group(10).main.value->GetFontSize(0,&mainSize));check(a.group(10).subtitle.value->GetFontSize(0,&subSize));
+   expectNear(mainSize,size,"actual lyric layout font size");expectNear(subSize,16.f*size/21,"translation layout scales proportionally");
+   require(a.flight.rows.empty()&&a.group(10).placed,"font change rebuilds positioned text without stale flight");
+  };
+  verify(14);float smallWidth=a.group(10).main.width;verify(36);require(a.group(10).main.width>smallWidth,"larger font changes measured text width");verify(28);
+  auto oldSettings=env(L"MINILYRICS_SETTINGS");SetEnvironmentVariableW(L"MINILYRICS_SETTINGS",a.settingsPath.c_str());
+  try{App restored;expectNear(restored.currentFontSize,28,"font size persists in native settings");expectNear(restored.translationFontSize,16.f*28/21,"restored translation scale");}catch(...){SetEnvironmentVariableW(L"MINILYRICS_SETTINGS",oldSettings.empty()?nullptr:oldSettings.c_str());throw;}
+  SetEnvironmentVariableW(L"MINILYRICS_SETTINGS",oldSettings.empty()?nullptr:oldSettings.c_str());
+  a.setLyricFontSize(99);expectNear(a.currentFontSize,36,"native upper size bound");a.setLyricFontSize(1);expectNear(a.currentFontSize,14,"native lower size bound");verify(21);
+  std::cout<<"PASS: font size, actual DirectWrite layouts, bounds and persistence\n";
+ }
  static void seekFlights(const std::filesystem::path&directory){
+  {
+   Fixture external;auto&x=external.a;external.lines(2);x.songId="external-test";x.playing=true;external.layout(10);
+   Json seek=Json::obj();seek["type"]="seek";seek["songId"]="stale-track";seek["position"]=41000;x.receive(seek);
+   require(x.flight.rows.empty()&&x.position==21000,"stale track seek ignored");seek["songId"]=x.songId;x.receive(seek);
+   require(!x.flight.rows.empty()&&x.index==20,"external seek uses the existing flight entry");
+   double started=x.flight.started;Json echo=Json::obj();echo["type"]="clock";echo["position"]=41000;echo["playing"]=true;echo["valid"]=true;x.receive(echo);
+   require(x.flight.started==started,"external seek timeline echo does not restart flight");
+   float from=x.flight.rows[20].point.y;x.testWallMs+=300;x.update();require(x.flight.rows[20].point.y<from,"external seek has intermediate geometry");
+   float current=x.flight.rows[20].point.y;seek["position"]=11000;x.receive(seek);
+   expectNear(x.flight.rows[20].point.y,current,"external rapid retarget starts at displayed frame");
+   x.testWallMs+=1000;x.update();require(x.flight.rows.empty()&&x.index==5,"external backward seek completes");
+   x.playing=false;x.update();seek["position"]=41000;x.receive(seek);require(x.frameRunning,"paused external seek schedules flight");
+   x.testWallMs+=1000;x.update();require(x.flight.rows.empty()&&!x.playing&&!x.frameRunning,"paused external seek finishes without resuming");
+   Json correction=Json::obj();correction["type"]="clock";correction["position"]=61000;correction["playing"]=false;correction["valid"]=true;x.receive(correction);
+   require(x.flight.rows.empty()&&x.index==30,"clock-only correction does not masquerade as a seek");
+  }
   Fixture f;auto&a=f.a;f.lines(2);a.height=160;a.viewportBottom=132;a.textX=20;a.playing=true;f.layout(10);Surface surface;surface.target->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
   auto render=[&](){surface.target->BeginDraw();surface.target->Clear(D2D1::ColorF(D2D1::ColorF::Black));surface.target->PushAxisAlignedClip(D2D1::RectF(a.textX,a.viewportTop,a.width-12,a.viewportBottom),D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);a.drawLyrics(surface.g,a.current()+a.offset);surface.target->PopAxisAlignedClip();check(surface.target->EndDraw());GdiFlush();return std::vector<BYTE>(surface.pixels,surface.pixels+Surface::width*Surface::height*4);};
   auto before=render();auto identity=a.group(10).identity;a.seekTo(41000);a.update();require(a.index==20&&!a.flight.rows.empty(),"seek updates progress immediately and starts a flight");require(a.group(10).identity==identity,"flight retains source layouts at its first frame");require(render()==before,"flight first frame matches the previous lyric pixels");
@@ -501,4 +532,4 @@ struct NativeTest {
  static void run(const std::filesystem::path&directory){typography();motionGeometry();scheduling();pixels(directory);interludes(directory);browseInterludes(directory);seekFlights(directory);backgrounds(directory);std::cout<<"PASS: "<<checks<<" native checks (DirectWrite, lyric/background pixels, animation geometry, settings and scheduling)\n";}
 };
 int NativeTest::checks=0;
-int main(int argc,char**argv){try{auto directory=argc>1?std::filesystem::path(argv[1]):std::filesystem::path();if(argc>2&&std::strcmp(argv[2],"flight")==0)NativeTest::seekFlights(directory);else if(argc>2&&std::strcmp(argv[2],"cleanup")==0)NativeTest::cleanup(directory);else if(argc>2&&std::strcmp(argv[2],"prelude")==0){NativeTest::preludeRows(directory);NativeTest::interludes(directory);}else if(argc>2&&std::strcmp(argv[2],"moving")==0)NativeTest::movingFrames(directory);else if(argc>2&&std::strcmp(argv[2],"words")==0)NativeTest::wordScrolling(directory);else if(argc>2&&std::strcmp(argv[2],"resize")==0)NativeTest::resizeRendering(directory);else if(argc>2&&std::strcmp(argv[2],"background")==0){NativeTest::backgrounds(directory);std::cout<<"PASS: "<<NativeTest::checks<<" focused background checks\n";}else if(argc>2&&std::strcmp(argv[2],"optimization")==0){NativeTest::optimizations(directory);NativeTest::seekFlights(directory);std::cout<<"PASS: "<<NativeTest::checks<<" focused optimization checks\n";}else NativeTest::run(directory);return 0;}catch(const std::exception&e){std::cerr<<"FAIL: "<<e.what()<<"\n";return 1;}}
+int main(int argc,char**argv){try{auto directory=argc>1?std::filesystem::path(argv[1]):std::filesystem::path();if(argc>2&&std::strcmp(argv[2],"font")==0)NativeTest::fontSizes(directory);else if(argc>2&&std::strcmp(argv[2],"flight")==0)NativeTest::seekFlights(directory);else if(argc>2&&std::strcmp(argv[2],"cleanup")==0)NativeTest::cleanup(directory);else if(argc>2&&std::strcmp(argv[2],"prelude")==0){NativeTest::preludeRows(directory);NativeTest::interludes(directory);}else if(argc>2&&std::strcmp(argv[2],"moving")==0)NativeTest::movingFrames(directory);else if(argc>2&&std::strcmp(argv[2],"words")==0)NativeTest::wordScrolling(directory);else if(argc>2&&std::strcmp(argv[2],"resize")==0)NativeTest::resizeRendering(directory);else if(argc>2&&std::strcmp(argv[2],"background")==0){NativeTest::backgrounds(directory);std::cout<<"PASS: "<<NativeTest::checks<<" focused background checks\n";}else if(argc>2&&std::strcmp(argv[2],"optimization")==0){NativeTest::optimizations(directory);NativeTest::seekFlights(directory);std::cout<<"PASS: "<<NativeTest::checks<<" focused optimization checks\n";}else NativeTest::run(directory);return 0;}catch(const std::exception&e){std::cerr<<"FAIL: "<<e.what()<<"\n";return 1;}}

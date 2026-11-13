@@ -1,4 +1,4 @@
-param([string]$ResultDirectory = (Join-Path (Get-Location) 'work/native-host-regression'), [ValidateSet('all','flight','background','optimization','background-edge','resize','cover','dpi','words','moving','prelude','cleanup')][string]$Focus='all')
+param([string]$ResultDirectory = (Join-Path (Get-Location) 'work/native-host-regression'), [ValidateSet('all','font','flight','background','optimization','background-edge','resize','cover','dpi','words','moving','prelude','cleanup')][string]$Focus='all')
 $ErrorActionPreference='Stop'
 New-Item -ItemType Directory -Force -Path $ResultDirectory | Out-Null
 $resultPath = (Resolve-Path -LiteralPath $ResultDirectory).Path

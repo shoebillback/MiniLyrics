@@ -9,8 +9,13 @@
   let position=0,anchor=performance.now(),playing=false,clockValid=false,offset=0;
   let infPosition=null,infPlaying=null,infAdvancedAt=0,hostState=null;
   let lastMeta='',lastLyrics='',lyricRevision=0,lastRnp=null,lastAppliedRnp=null;
-  let pendingSeek=null,seekTimer=null,lastSeekId=0,seekGuardUntil=0;
+  let pendingSeek=null,seekTimer=null,lastSeekId=0,seekGuardUntil=0,widgetSeekEcho=null;
+  let seekObserver=null,seekObserverPrevious=null,seekObserverChannel=null,seekObserverDepth=0;
   let status='小窗未启动',statusView=null,lastRnpStyle='';
+  const normalizeFontSize=value=>Number.isFinite(Number(value))&&value!==''?Math.max(14,Math.min(36,Math.round(Number(value)))):21;
+  let fontSize=21;try{fontSize=normalizeFontSize(plugin.getConfig?.('fontSize',21));}catch{}
+  function sendFont(){send({type:'font',size:fontSize});}
+  function changeFontSize(value){fontSize=normalizeFontSize(value);try{plugin.setConfig?.('fontSize',fontSize);}catch(e){console.warn('[MiniLyrics] 保存字号失败',e);}sendFont();}
   function normalizeBackground(value){
     const v=value&&typeof value==='object'?value:{},mode=Number(v.mode),speed=Number(v.speed),fps=Number(v.fps);
     return {mode:Number.isInteger(mode)&&mode>=0&&mode<=3?mode:1,animated:typeof v.animated==='boolean'?v.animated:true,
@@ -60,11 +65,53 @@
     const signature=curve+':'+stagger;if(force||signature!==lastRnpStyle){lastRnpStyle=signature;send({type:'style',curve,stagger});}
   }
   function clearSeek(){clearTimeout(seekTimer);seekTimer=null;pendingSeek=null;}
+  function beginSeek(target,requestId=0){
+    const own={id:requestId,songId:song.id,previous:live()};
+    clearSeek();seekGuardUntil=0;widgetSeekEcho=null;lastSeekId=requestId;pendingSeek=own;
+    position=target;anchor=performance.now();clockValid=true;
+    send({type:'seek',songId:song.id,position:target,requestId});
+    sendClock('pending');
+    seekTimer=setTimeout(()=>failSeek(own,'跳转未确认，已恢复进度'),SEEK_TIMEOUT_MS);
+    return own;
+  }
+  function observePlayerSeek(target){
+    if(stopped||socket?.readyState!==1||!song.id)return;
+    const now=performance.now();
+    // Consume only the matching command echo, never a later nearby player seek.
+    if(widgetSeekEcho){
+      const echo=widgetSeekEcho;
+      if(now>echo.until)widgetSeekEcho=null;
+      else if(Math.abs(target-echo.target)<=1){widgetSeekEcho=null;return;}
+    }
+    syncSong();recoverLyrics();
+    beginSeek(Math.min(song.duration||Infinity,target));
+  }
+  function attachSeekObserver(){
+    const bridge=window.channel;
+    if(!bridge||typeof bridge.call!=='function'||bridge.call===seekObserver)return;
+    const previous=bridge.call;
+    // RNPNext observes the same audioplayer.seek call. Chain its hook unchanged.
+    const observer=function(...args){
+      const outermost=seekObserverDepth++===0;
+      try{
+        if(!stopped&&outermost&&args[0]==='audioplayer.seek'&&Array.isArray(args[2])){
+          const raw=args[2][2],target=typeof raw==='number'||typeof raw==='string'&&raw.trim()!==''?Number(raw)*1000:NaN;
+          if(Number.isFinite(target)&&target>=0)try{observePlayerSeek(target);}catch(e){console.debug('[MiniLyrics] seek observation',e);}
+        }
+        return Reflect.apply(previous,this,args);
+      }finally{seekObserverDepth--;}
+    };
+    seekObserverPrevious=previous;seekObserverChannel=bridge;seekObserver=observer;bridge.call=observer;
+  }
+  function detachSeekObserver(){
+    if(seekObserverChannel?.call===seekObserver)seekObserverChannel.call=seekObserverPrevious;
+    seekObserver=null;seekObserverPrevious=null;seekObserverChannel=null;widgetSeekEcho=null;
+  }
   function syncSong(){
     let info;try{info=infLink?.getCurrentSong?.();}catch{return false;}
     const next=C.metadata(info);if(!next)return false;
     if(next.id!==song.id){
-      clearSeek();lastSeekId=0;seekGuardUntil=0;
+      clearSeek();lastSeekId=0;seekGuardUntil=0;widgetSeekEcho=null;
       position=0;anchor=performance.now();clockValid=false;
       infPosition=null;infPlaying=null;lines=[];lastLyrics='[]';lastAppliedRnp=null;hostState=null;
     }
@@ -83,7 +130,7 @@
     if(api!==infLink||!song.id||t?.currentTime==null||!Number.isFinite(Number(t.currentTime)))return false;
     const next=Math.max(0,Number(t.currentTime)),state=api.getPlaybackStatus?.();
     const nextPlaying=state==null?playing:String(state).toLowerCase()==='playing';
-    if(next===infPosition&&nextPlaying===infPlaying)return false;
+    if(!pendingSeek&&next===infPosition&&nextPlaying===infPlaying)return false;
     const now=performance.now();
     if((pendingSeek||now<seekGuardUntil)&&Math.abs(next-live())>SEEK_TOLERANCE_MS)return false;
     let seekState='';
@@ -114,10 +161,9 @@
     syncSong();recoverLyrics();if(requestSong&&requestSong!==song.id)return;
     const target=Math.max(0,Math.min(song.duration||Infinity,Number(ms)));
     if(!Number.isFinite(target))return;
-    clearSeek();lastSeekId=Number(requestId)||lastSeekId+1;seekGuardUntil=0;
-    const own={id:lastSeekId,songId:song.id,previous:live()};
-    pendingSeek=own;position=target;anchor=performance.now();clockValid=true;sendClock('pending');
-    seekTimer=setTimeout(()=>failSeek(own,'跳转未确认，已恢复进度'),SEEK_TIMEOUT_MS);
+    lastSeekId=Number(requestId)||lastSeekId+1;
+    const own=beginSeek(target,lastSeekId);
+    widgetSeekEcho={target,until:performance.now()+SEEK_TIMEOUT_MS};
     try{
       if(typeof infLink?.seekTo!=='function')throw Error('InfLink 未就绪');
       const result=infLink.seekTo(target);
@@ -156,13 +202,13 @@
   }
   function tick(){
     if(stopped||socket?.readyState!==1)return;
-    attachInfLink();sample();sendRnpStyle();
+    attachSeekObserver();attachInfLink();sample();sendRnpStyle();
     if(playing&&clockValid&&!pendingSeek&&!infTimelineFresh()){
       position=live();anchor=performance.now();clockValid=false;status='等待 InfLink 播放进度';sendClock();
     }
     send({type:'ping'});timer=setTimeout(tick,1000);
   }
-  function resyncPage(){if(!stopped){attachInfLink();sample();}}
+  function resyncPage(){if(!stopped){attachSeekObserver();attachInfLink();sample();}}
   function refreshStatus(){
     if(!statusView)return;const text=status+' · 进度：'+(infLink?'InfLink':'等待 InfLink')+' · '+Math.floor(live()/1000)+' 秒 · RNP 歌词 '+lines.length+' 行 · 小窗确认：'+(hostState?.lyricCount??'待回报');if(statusView.textContent!==text)statusView.textContent=text;
   }
@@ -193,7 +239,7 @@
           if(m.type==='lyrics-ack'||m.type==='host-state'||m.type==='background-state'){hostState=m;refreshStatus();}else command(m);
         }catch(err){console.debug('[MiniLyrics]',err);}};
         ws.onclose=()=>{if(socket!==ws)return;socket=null;clearTimeout(timer);clearSeek();detachInfLink?.();detachInfLink=null;infLink=null;status='小窗已关闭';refreshStatus();};
-        send({type:'hello',token});send({type:'track',...song});send({type:'lyrics',songId:song.id,revision:++lyricRevision,lines});sendClock();sendRnpStyle(true);sendBackground();
+        send({type:'hello',token});send({type:'track',...song});sendFont();send({type:'lyrics',songId:song.id,revision:++lyricRevision,lines});sendClock();sendRnpStyle(true);sendBackground();
         status='已连接';tick();busy=false;return;
       }
       }
@@ -202,7 +248,7 @@
     busy=false;
   }
   function dispose(){stopped=true;session++;clearTimeout(timer);clearSeek();detachInfLink?.();detachInfLink=null;infLink=null;
-    send({type:'exit'});socket?.close();socket=null;for(const [target,name,fn]of listeners)target.removeEventListener?.(name,fn);}
+    detachSeekObserver();send({type:'exit'});socket?.close();socket=null;for(const [target,name,fn]of listeners)target.removeEventListener?.(name,fn);}
   listen(document,'lyrics-updated',e=>{if(stopped)return;const update=e.detail??window.currentLyrics;cacheRnp(update);attachInfLink();sample(update);});
   // RNP persists this setting before dispatching the event. Share the reader
   // and signature with periodic recovery so the same style is sent only once.
@@ -214,7 +260,12 @@
     const title=document.createElement('h2');title.textContent='MiniLyrics 音乐小窗';el.append(title);
     for(const [text,fn]of [['打开 / 找回小窗',open],['退出鼠标穿透',()=>send({type:'unlock'})],['重置位置和尺寸',()=>send({type:'reset'})],['关闭小窗',()=>send({type:'exit'})]]){
       const b=document.createElement('button');b.textContent=text;b.style.cssText='padding:8px 14px;margin:0 8px 12px 0';b.onclick=fn;el.append(b);}
-    const p=document.createElement('p');p.textContent='左侧封面可拖动；右下角可缩放。在歌词区滚动鼠标滚轮可回看前后歌词，停止滚动约 4 秒后回到当前句，点击歌词可跳转。开启鼠标穿透后，可在 MiniLyrics 设置中点击“退出鼠标穿透”恢复操作；右键小窗可切换翻译与帧率。默认 60 FPS，也可选择 30 FPS。';el.append(p);
+    const p=document.createElement('p');p.textContent='拖动封面移动，右下角缩放；滚轮回看歌词，点击歌词跳转。右键小窗可调整翻译、置顶和帧率。';el.append(p);
+    const fontHeading=document.createElement('h3');fontHeading.textContent='歌词字体';el.append(fontHeading);
+    const fontRow=document.createElement('label');fontRow.style.cssText='display:block;margin:10px 0';fontRow.textContent='字号（14–36）';
+    const fontInput=document.createElement('input');fontInput.type='number';fontInput.id='miniLyrics-font-size';fontInput.min='14';fontInput.max='36';fontInput.step='1';fontInput.value=String(fontSize);fontInput.style.cssText='width:72px;padding:5px 8px;margin-left:12px';fontInput.onchange=()=>{changeFontSize(fontInput.value);fontInput.value=String(fontSize);};
+    const fontReset=document.createElement('button');fontReset.textContent='恢复默认';fontReset.style.cssText='margin-left:12px;padding:5px 10px';fontReset.onclick=()=>{changeFontSize(21);fontInput.value=String(fontSize);};fontRow.append(fontInput,fontReset);el.append(fontRow);
+    const fontTip=document.createElement('p');fontTip.textContent='翻译和前后歌词按比例缩放。';el.append(fontTip);
     const heading=document.createElement('h3');heading.textContent='背景';el.append(heading);
     const makeSelect=(id,choices,value)=>{const control=document.createElement('select');control.id=id;control.style.cssText='padding:5px 8px;margin-left:12px';for(const [v,text]of choices){const option=document.createElement('option');option.value=String(v);option.textContent=text;control.append(option);}control.value=String(value);return control;};
     const addRow=(text,control)=>{const row=document.createElement('label');row.style.cssText='display:block;margin:10px 0';const label=document.createElement('span');label.textContent=text;row.append(label,control);el.append(row);};
@@ -227,7 +278,6 @@
     animated.onchange=()=>{changeBackground({animated:animated.checked});refreshControls();};
     speed.onchange=()=>changeBackground({speed:Number(speed.value)});rate.onchange=()=>changeBackground({fps:Number(rate.value)});
     addRow('背景样式',mode);addRow('动态流动',animated);addRow('流动速度',speed);addRow('背景帧率',rate);refreshControls();
-    const tip=document.createElement('p');tip.textContent='Lyricify 背景使用封面旋转、模糊和网格形变。背景默认 60 FPS，可选 10 / 15 / 30 / 45 / 60 FPS，独立于歌词帧率。播放时流动，暂停时冻结；调整窗口大小时暂时保持当前背景，松手后更新。关闭“动态流动”可保留静态效果。设置自动保存。';el.append(tip);
     const links=document.createElement('p');
     for(const [label,url]of [['源码与许可证','https://github.com/shoebillback/MiniLyrics'],['反馈问题','https://github.com/shoebillback/MiniLyrics/issues']]){
       const link=document.createElement('a');link.textContent=label;link.href=url;link.style.cssText='margin-right:18px';

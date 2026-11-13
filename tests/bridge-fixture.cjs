@@ -15,7 +15,7 @@ function fixture(options={}){
   plugin:{pluginPath:'C:/test/plugin',onLoad:fn=>load=fn,onConfig:fn=>configure=fn,getConfig:(key,fallback)=>savedConfig[key]??fallback,setConfig:(key,value)=>savedConfig[key]=JSON.parse(JSON.stringify(value))},loadedPlugins:{},
   betterncm:{app:{exec:async command=>{launches.push(command);return true;}}},
   document:{createElement:tag=>({tagName:tag,style:{},children:[],textContent:'',append(...children){this.children.push(...children);}}),addEventListener:add,removeEventListener:remove,getElementById:()=>{throw Error('Redux access removed');},querySelector:()=>{throw Error('DOM player access removed');}},
-  channel:{call:()=>{throw Error('native API access removed');}},fetch:()=>{throw Error('online lyrics removed');},
+  channel:{call:options.channelCall??(()=>{throw Error('native API access removed');})},fetch:()=>{throw Error('online lyrics removed');},
   localStorage:{getItem:key=>options.storage?.[key]??(key==='refined-now-playing-lyric-offset'?options.offset??null:null)},addEventListener:add,removeEventListener:remove};
  context.document.body={classList:{contains:name=>(options.classes??[]).includes(name)}};
  context.window=context;if(!options.noApi)context.InfLinkApi=api;
