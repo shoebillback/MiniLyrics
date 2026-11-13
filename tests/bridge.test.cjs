@@ -44,23 +44,21 @@ test('paused snapshots stay fixed and resume correctly',()=>withFixture(f=>{
  f.emitPlay('Paused');const p=f.diagnostics().positionMs;f.advance(12000);assert.equal(f.diagnostics().positionMs,p);assert.equal(f.diagnostics().valid,true);
  f.emitPlay('Playing');f.advance(1000);assert.ok(f.diagnostics().positionMs>p);
 }));
-test('seek keeps the target while old InfLink progress arrives, then confirms',()=>withFixture(f=>{
- f.seek(60000);assert.equal(f.seeks.at(-1),60000);assert.equal(f.diagnostics().seekPending,true);
- f.advance(200);f.emitTimeline(11200);assert.equal(f.diagnostics().positionMs,60200);
+test('widget seek waits for an actual timeline change without predicting its target',()=>withFixture(f=>{
+ const before=f.diagnostics().positionMs;f.seek(60000);assert.equal(f.seeks.at(-1),60000);
+ assert.equal(f.diagnostics().positionMs,before);assert.equal(f.diagnostics().seekPending,true);
  f.emitTimeline(60300);assert.equal(f.diagnostics().seekPending,false);assert.equal(f.diagnostics().positionMs,60300);
- f.emitTimeline(11500);assert.equal(f.diagnostics().positionMs,60300);
- assert.equal(f.sent.filter(m=>m.type==='clock'&&m.seekState==='confirmed').at(-1).seekRequest,1);
+ assert.equal(f.sent.filter(m=>m.type==='clock').at(-1).seekState,'confirmed');
 }));
-test('backward seek receives the same protection',()=>withFixture(f=>{
- f.emitTimeline(60000);f.seek(5000);f.emitTimeline(60100);assert.equal(f.diagnostics().positionMs,5000);
- f.emitTimeline(5100);assert.equal(f.diagnostics().positionMs,5100);assert.equal(f.diagnostics().seekPending,false);
+test('backward seek is confirmed by the actual timeline',()=>withFixture(f=>{
+ f.emitTimeline(60000);f.seek(5000);f.emitTimeline(5100);assert.equal(f.diagnostics().positionMs,5100);assert.equal(f.diagnostics().seekPending,false);
 }));
-test('latest seek owns confirmation when clicks happen in rapid succession',()=>withFixture(f=>{
- f.seek(60000,1);f.seek(30000,2);f.emitTimeline(60100);assert.equal(f.diagnostics().positionMs,30000);assert.equal(f.diagnostics().seekPending,true);
- f.emitTimeline(30100);assert.equal(f.diagnostics().seekPending,false);assert.equal(f.diagnostics().seekRequest,2);
+test('external position can supersede a pending widget seek',()=>withFixture(f=>{
+ f.seek(60000,1);f.seek(30000,2);f.emitTimeline(20000);
+ assert.equal(f.diagnostics().seekPending,false);assert.equal(f.diagnostics().positionMs,20000);
 }));
-test('synchronous InfLink timeline callback during seek cannot be overwritten by the caller',()=>withFixture(f=>{
- f.setSeek(target=>f.emitTimeline(target+100));f.seek(60000);assert.equal(f.diagnostics().positionMs,60100);assert.equal(f.diagnostics().seekPending,false);
+test('synchronous timeline confirmation cannot be overwritten by the caller',()=>withFixture(f=>{
+ f.setSeek(target=>f.emitTimeline(target));f.seek(60000);assert.equal(f.diagnostics().positionMs,60000);assert.equal(f.diagnostics().seekPending,false);
 }));
 test('unconfirmed seek expires and restores the actual snapshot',()=>withFixture(f=>{
  f.seek(60000);f.setSnapshot(12000);f.advance(2600);assert.equal(f.diagnostics().seekPending,false);assert.ok(f.diagnostics().positionMs>=12000&&f.diagnostics().positionMs<13000);

@@ -9,8 +9,7 @@
   let position=0,anchor=performance.now(),playing=false,clockValid=false,offset=0;
   let infPosition=null,infPlaying=null,infAdvancedAt=0,hostState=null;
   let lastMeta='',lastLyrics='',lyricRevision=0,lastRnp=null,lastAppliedRnp=null;
-  let pendingSeek=null,seekTimer=null,lastSeekId=0,seekGuardUntil=0,widgetSeekEcho=null;
-  let seekObserver=null,seekObserverPrevious=null,seekObserverChannel=null,seekObserverDepth=0;
+  let pendingSeek=null,seekTimer=null,lastSeekId=0;
   let status='小窗未启动',statusView=null,lastRnpStyle='';
   const normalizeFontSize=value=>Number.isFinite(Number(value))&&value!==''?Math.max(14,Math.min(36,Math.round(Number(value)))):21;
   let fontSize=21;try{fontSize=normalizeFontSize(plugin.getConfig?.('fontSize',21));}catch{}
@@ -65,53 +64,11 @@
     const signature=curve+':'+stagger;if(force||signature!==lastRnpStyle){lastRnpStyle=signature;send({type:'style',curve,stagger});}
   }
   function clearSeek(){clearTimeout(seekTimer);seekTimer=null;pendingSeek=null;}
-  function beginSeek(target,requestId=0){
-    const own={id:requestId,songId:song.id,previous:live()};
-    clearSeek();seekGuardUntil=0;widgetSeekEcho=null;lastSeekId=requestId;pendingSeek=own;
-    position=target;anchor=performance.now();clockValid=true;
-    send({type:'seek',songId:song.id,position:target,requestId});
-    sendClock('pending');
-    seekTimer=setTimeout(()=>failSeek(own,'跳转未确认，已恢复进度'),SEEK_TIMEOUT_MS);
-    return own;
-  }
-  function observePlayerSeek(target){
-    if(stopped||socket?.readyState!==1||!song.id)return;
-    const now=performance.now();
-    // Consume only the matching command echo, never a later nearby player seek.
-    if(widgetSeekEcho){
-      const echo=widgetSeekEcho;
-      if(now>echo.until)widgetSeekEcho=null;
-      else if(Math.abs(target-echo.target)<=1){widgetSeekEcho=null;return;}
-    }
-    syncSong();recoverLyrics();
-    beginSeek(Math.min(song.duration||Infinity,target));
-  }
-  function attachSeekObserver(){
-    const bridge=window.channel;
-    if(!bridge||typeof bridge.call!=='function'||bridge.call===seekObserver)return;
-    const previous=bridge.call;
-    // RNPNext observes the same audioplayer.seek call. Chain its hook unchanged.
-    const observer=function(...args){
-      const outermost=seekObserverDepth++===0;
-      try{
-        if(!stopped&&outermost&&args[0]==='audioplayer.seek'&&Array.isArray(args[2])){
-          const raw=args[2][2],target=typeof raw==='number'||typeof raw==='string'&&raw.trim()!==''?Number(raw)*1000:NaN;
-          if(Number.isFinite(target)&&target>=0)try{observePlayerSeek(target);}catch(e){console.debug('[MiniLyrics] seek observation',e);}
-        }
-        return Reflect.apply(previous,this,args);
-      }finally{seekObserverDepth--;}
-    };
-    seekObserverPrevious=previous;seekObserverChannel=bridge;seekObserver=observer;bridge.call=observer;
-  }
-  function detachSeekObserver(){
-    if(seekObserverChannel?.call===seekObserver)seekObserverChannel.call=seekObserverPrevious;
-    seekObserver=null;seekObserverPrevious=null;seekObserverChannel=null;widgetSeekEcho=null;
-  }
   function syncSong(){
     let info;try{info=infLink?.getCurrentSong?.();}catch{return false;}
     const next=C.metadata(info);if(!next)return false;
     if(next.id!==song.id){
-      clearSeek();lastSeekId=0;seekGuardUntil=0;widgetSeekEcho=null;
+      clearSeek();lastSeekId=0;
       position=0;anchor=performance.now();clockValid=false;
       infPosition=null;infPlaying=null;lines=[];lastLyrics='[]';lastAppliedRnp=null;hostState=null;
     }
@@ -129,12 +86,14 @@
   function acceptTimeline(t,api){
     if(api!==infLink||!song.id||t?.currentTime==null||!Number.isFinite(Number(t.currentTime)))return false;
     const next=Math.max(0,Number(t.currentTime)),state=api.getPlaybackStatus?.();
-    const nextPlaying=state==null?playing:String(state).toLowerCase()==='playing';
-    if(!pendingSeek&&next===infPosition&&nextPlaying===infPlaying)return false;
-    const now=performance.now();
-    if((pendingSeek||now<seekGuardUntil)&&Math.abs(next-live())>SEEK_TOLERANCE_MS)return false;
-    let seekState='';
-    if(pendingSeek){clearSeek();seekGuardUntil=now+1200;seekState='confirmed';status='已连接';}
+    const nextPlaying=state==null?playing:String(state).toLowerCase()==='playing',now=performance.now();
+    let seekState=pendingSeek?'pending':'';
+    if(pendingSeek){
+      const expected=pendingSeek.target+(nextPlaying?Math.max(0,now-pendingSeek.started):0);
+      // Actual position is authoritative, including an external seek that supersedes ours.
+      if(Math.abs(next-expected)<=250||Math.abs(next-live())>SEEK_TOLERANCE_MS){clearSeek();seekState='confirmed';}
+    }
+    if(next===infPosition&&nextPlaying===infPlaying&&seekState!=='confirmed')return false;
     infPosition=next;infPlaying=nextPlaying;infAdvancedAt=now;
     position=next;anchor=now;playing=nextPlaying;clockValid=true;status='已连接';
     if(Number(t.totalTime)>0)song.duration=Number(t.totalTime);
@@ -147,7 +106,7 @@
   }
   function failSeek(own,reason){
     if(pendingSeek!==own)return;
-    clearSeek();seekGuardUntil=0;
+    clearSeek();
     try{
       const t=infLink?.getTimeline?.();
       if(t?.currentTime!=null&&Number.isFinite(Number(t.currentTime))){
@@ -162,8 +121,10 @@
     const target=Math.max(0,Math.min(song.duration||Infinity,Number(ms)));
     if(!Number.isFinite(target))return;
     lastSeekId=Number(requestId)||lastSeekId+1;
-    const own=beginSeek(target,lastSeekId);
-    widgetSeekEcho={target,until:performance.now()+SEEK_TIMEOUT_MS};
+    clearSeek();
+    const own={id:lastSeekId,songId:song.id,target,started:performance.now(),previous:live()};pendingSeek=own;
+    seekTimer=setTimeout(()=>failSeek(own,'跳转未确认，已恢复进度'),SEEK_TIMEOUT_MS);
+    sendClock('pending');
     try{
       if(typeof infLink?.seekTo!=='function')throw Error('InfLink 未就绪');
       const result=infLink.seekTo(target);
@@ -186,7 +147,7 @@
     infLink=api;
     if(wasPending)failSeek(wasPending,'InfLink 连接变化，跳转已取消');
     position=live();anchor=performance.now();playing=false;clockValid=false;
-    infPosition=null;infPlaying=null;seekGuardUntil=0;
+    infPosition=null;infPlaying=null;
     if(!infLink){status='等待 InfLink-rs';sendClock();return;}
     const onTimeline=e=>{if(infLink!==api)return;syncSong();recoverLyrics();acceptTimeline(e.detail,api);};
     const onSong=()=>{if(infLink===api)sample();};
@@ -202,53 +163,74 @@
   }
   function tick(){
     if(stopped||socket?.readyState!==1)return;
-    attachSeekObserver();attachInfLink();sample();sendRnpStyle();
+    attachInfLink();sample();sendRnpStyle();
     if(playing&&clockValid&&!pendingSeek&&!infTimelineFresh()){
       position=live();anchor=performance.now();clockValid=false;status='等待 InfLink 播放进度';sendClock();
     }
     send({type:'ping'});timer=setTimeout(tick,1000);
   }
-  function resyncPage(){if(!stopped){attachSeekObserver();attachInfLink();sample();}}
+  function resyncPage(){if(!stopped){attachInfLink();sample();}}
   function refreshStatus(){
     if(!statusView)return;const text=status+' · 进度：'+(infLink?'InfLink':'等待 InfLink')+' · '+Math.floor(live()/1000)+' 秒 · RNP 歌词 '+lines.length+' 行 · 小窗确认：'+(hostState?.lyricCount??'待回报');if(statusView.textContent!==text)statusView.textContent=text;
   }
+  function connectSocket(port){
+    const ws=new WebSocket(`ws://127.0.0.1:${port}/`);
+    return new Promise(resolve=>{
+      let settled=false;
+      const finish=ok=>{if(settled)return;settled=true;clearTimeout(timeout);if(!ok)ws.close();resolve(ok?ws:null);};
+      const timeout=setTimeout(()=>finish(false),800);
+      ws.onopen=()=>finish(true);ws.onerror=()=>finish(false);ws.onclose=()=>finish(false);
+    });
+  }
+  function retireSocket(ws,token){
+    if(!ws)return;
+    if(ws.readyState===1){ws.send(JSON.stringify({type:'hello',token}));ws.send(JSON.stringify({type:'exit'}));}
+    ws.close();
+  }
+  async function retireHost(port,token){
+    await new Promise(r=>setTimeout(r,200));
+    try{retireSocket(await connectSocket(port),token);}catch{}
+  }
   async function open(){
-    if(busy)return;if(socket?.readyState===1){send({type:'show'});return;}
-    busy=true;stopped=false;const own=++session;
-    const bytes=new Uint8Array(24);crypto.getRandomValues(bytes);
-    const token=Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');
-    const pluginPath=String(plugin.pluginPath??loadedPlugins.MiniLyrics?.pluginPath??'').replace(/\//g,'\\').replace(/\\\.\\/g,'\\');
+    if(stopped||busy)return;if(socket?.readyState===1){send({type:'show'});return;}
+    busy=true;const own=++session,current=()=>!stopped&&own===session;
     try{
+      const bytes=new Uint8Array(24);crypto.getRandomValues(bytes);
+      const token=Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');
+      const pluginPath=String(plugin.pluginPath??loadedPlugins.MiniLyrics?.pluginPath??'').replace(/\//g,'\\').replace(/\\\.\\/g,'\\');
       if(!pluginPath||/["\r\n]/.test(pluginPath))throw new Error('无法确定插件路径');
-      // Keep the usual choice below Windows' default ephemeral TCP range.
-      // A failed bind is retried with a new port instead of leaving a dead widget.
       const firstPort=Math.floor(Math.random()*6000);
       for(let launch=0;launch<3;launch++){
-      const port=42000+(firstPort+launch*1543)%6000;
-      const ok=await betterncm.app.exec(`"${pluginPath}\\MiniLyricsHost.exe" --port ${port} --token ${token}`,false,false);
-      if(ok===false)throw new Error('原生窗口启动失败');
-      for(let attempt=0;attempt<15;attempt++){
-        if(own!==session)return;
-        await new Promise(r=>setTimeout(r,200));
-        const ws=new WebSocket(`ws://127.0.0.1:${port}/`);
-        const connected=await new Promise(resolve=>{const t=setTimeout(()=>{ws.close();resolve(false);},800);
-          ws.onopen=()=>{clearTimeout(t);resolve(true);};ws.onerror=()=>{clearTimeout(t);resolve(false);};});
-        if(!connected){ws.close();continue;}
-        socket=ws;ws.onmessage=e=>{try{
-          const m=JSON.parse(e.data);
-          if(m.type==='lyrics-ack'||m.type==='host-state'||m.type==='background-state'){hostState=m;refreshStatus();}else command(m);
-        }catch(err){console.debug('[MiniLyrics]',err);}};
-        ws.onclose=()=>{if(socket!==ws)return;socket=null;clearTimeout(timer);clearSeek();detachInfLink?.();detachInfLink=null;infLink=null;status='小窗已关闭';refreshStatus();};
-        send({type:'hello',token});send({type:'track',...song});sendFont();send({type:'lyrics',songId:song.id,revision:++lyricRevision,lines});sendClock();sendRnpStyle(true);sendBackground();
-        status='已连接';tick();busy=false;return;
-      }
+        const port=42000+(firstPort+launch*1543)%6000;
+        const ok=await betterncm.app.exec(`"${pluginPath}\\MiniLyricsHost.exe" --port ${port} --token ${token}`,false,false);
+        if(!current()){if(ok!==false)await retireHost(port,token);return;}
+        if(ok===false)throw new Error('原生窗口启动失败');
+        for(let attempt=0;attempt<15;attempt++){
+          await new Promise(r=>setTimeout(r,200));
+          if(!current()){await retireHost(port,token);return;}
+          const ws=await connectSocket(port);
+          if(!current()){if(ws)retireSocket(ws,token);return;}
+          if(!ws)continue;
+          socket=ws;ws.onmessage=e=>{if(!current()||socket!==ws)return;try{
+            const m=JSON.parse(e.data);
+            if(m.type==='lyrics-ack'||m.type==='host-state'||m.type==='background-state'){hostState=m;refreshStatus();}else command(m);
+          }catch(err){console.debug('[MiniLyrics]',err);}};
+          ws.onclose=()=>{if(!current()||socket!==ws)return;socket=null;clearTimeout(timer);clearSeek();detachInfLink?.();detachInfLink=null;infLink=null;status='小窗已关闭';refreshStatus();};
+          send({type:'hello',token});send({type:'track',...song});sendFont();send({type:'lyrics',songId:song.id,revision:++lyricRevision,lines});sendClock();sendRnpStyle(true);sendBackground();
+          status='已连接';tick();return;
+        }
       }
       throw new Error('无法连接小窗；请检查原生程序是否被阻止');
-    }catch(e){status=String(e.message??e);console.error('[MiniLyrics]',e);}
-    busy=false;
+    }catch(e){if(current()){status=String(e.message??e);console.error('[MiniLyrics]',e);}}
+    finally{if(own===session)busy=false;}
   }
-  function dispose(){stopped=true;session++;clearTimeout(timer);clearSeek();detachInfLink?.();detachInfLink=null;infLink=null;
-    detachSeekObserver();send({type:'exit'});socket?.close();socket=null;for(const [target,name,fn]of listeners)target.removeEventListener?.(name,fn);}
+  function closeWindow(){
+    session++;busy=false;clearTimeout(timer);clearSeek();
+    send({type:'exit'});const previous=socket;socket=null;previous?.close();
+    detachInfLink?.();detachInfLink=null;infLink=null;
+    status='小窗已关闭';refreshStatus();
+  }
+  function dispose(){stopped=true;closeWindow();for(const [target,name,fn]of listeners)target.removeEventListener?.(name,fn);}
   listen(document,'lyrics-updated',e=>{if(stopped)return;const update=e.detail??window.currentLyrics;cacheRnp(update);attachInfLink();sample(update);});
   // RNP persists this setting before dispatching the event. Share the reader
   // and signature with periodic recovery so the same style is sent only once.
@@ -258,7 +240,7 @@
   plugin.onConfig(()=>{
     const el=document.createElement('div');el.style.cssText='padding:24px;line-height:1.8;max-width:700px';
     const title=document.createElement('h2');title.textContent='MiniLyrics 音乐小窗';el.append(title);
-    for(const [text,fn]of [['打开 / 找回小窗',open],['退出鼠标穿透',()=>send({type:'unlock'})],['重置位置和尺寸',()=>send({type:'reset'})],['关闭小窗',()=>send({type:'exit'})]]){
+    for(const [text,fn]of [['打开 / 找回小窗',open],['退出鼠标穿透',()=>send({type:'unlock'})],['重置位置和尺寸',()=>send({type:'reset'})],['关闭小窗',closeWindow]]){
       const b=document.createElement('button');b.textContent=text;b.style.cssText='padding:8px 14px;margin:0 8px 12px 0';b.onclick=fn;el.append(b);}
     const p=document.createElement('p');p.textContent='拖动封面移动，右下角缩放；滚轮回看歌词，点击歌词跳转。右键小窗可调整翻译、置顶和帧率。';el.append(p);
     const fontHeading=document.createElement('h3');fontHeading.textContent='歌词字体';el.append(fontHeading);

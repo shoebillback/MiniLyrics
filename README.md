@@ -1,6 +1,6 @@
 # MiniLyrics
 
-Windows 原生桌面歌词小窗，基于 BetterNCM、RefinedNowPlayingNext 与 InfLink-rs。当前版本 **0.6.20**，作者 **shoebillback**。
+Windows 原生桌面歌词小窗，基于 BetterNCM、RefinedNowPlayingNext 与 InfLink-rs。当前版本 **0.6.31**，作者 **shoebillback**。
 
 显示端使用 C++ / Win32 / Direct2D / DirectWrite，JavaScript 负责歌词、播放信息及控制桥接。运行时无需安装 .NET、Node.js 或 WebView2。
 
@@ -15,7 +15,7 @@ Windows 原生桌面歌词小窗，基于 BetterNCM、RefinedNowPlayingNext 与 
 
 需要 Windows 10/11 x64、网易云音乐 3.1.11+、BetterNCM ≥ 1.0.0、RefinedNowPlayingNext 与 InfLink-rs。
 
-1. 从 GitHub Actions 的成功构建记录下载 `source-inclusive-plugin` 产物，解压得到 `MiniLyrics-0.6.20.plugin`；也可本地编译生成。商店收录后可直接从商店安装。
+1. 从 GitHub Actions 的成功构建记录下载 `source-inclusive-plugin` 产物，解压得到 `MiniLyrics-<版本号>.plugin`；也可本地编译生成。商店收录后可直接从商店安装。
 2. 完全退出网易云音乐与旧 MiniLyrics 小窗，将插件包放入 BetterNCM 数据目录下的 `plugins` 文件夹，替换旧包。
 3. 重启网易云，在 MiniLyrics 设置中点击“打开 / 找回小窗”。
 
@@ -49,7 +49,7 @@ powershell -NoProfile -File .\build.ps1 -SkipNativeBuild -OutputDirectory .\dist
 
 ## 版本与许可证
 
-0.6.20 将背景与歌词默认帧率调整为 60 FPS，默认窗口为最小尺寸 360×130（随系统缩放调整）。已保存的个人设置继续保留；“重置位置和尺寸”恢复最小窗口。详见 [CHANGELOG.md](CHANGELOG.md)。
+0.6.31 移除全局原生跳转监听，统一由 InfLink 实际时间轴驱动歌词过渡。保留连接取消和封面重试修复。详见 [CHANGELOG.md](CHANGELOG.md)。
 
 项目采用 [GPL-3.0-or-later](LICENSE)，第三方来源和许可证见 [THIRD_PARTY.md](THIRD_PARTY.md) 与 licenses 目录。
 
@@ -65,6 +65,6 @@ powershell -NoProfile -File .\build.ps1 -SkipNativeBuild -OutputDirectory .\dist
 
 ## 当前开发状态
 
-当前源码版本为 0.6.27，包含字号设置、设置说明精简和统一跳转流程。快速执行“小窗跳转 → 网易云原版进度条跳转”时，仍可能出现最后一次歌词直接定位、没有过渡动画的问题，尚未完成修复。
+当前源码版本为 0.6.31。MiniLyrics 不再注册或包装网易云全局原生事件入口。小窗发出控制命令后，两边进度条的实际位置都由 InfLink 回报；显示端在更新位置前保留当前画面，接续歌词过渡，不等待额外 Seek 通知。
 
-0.6.25 的字号及基础回归检查已通过；后续跳转调整只做过编译，单次现场记录重放确认存在未标记为跳转的进度变化，不能视为修复验证通过。商店发行分支未随本次源码同步更新。
+20 项定向脚本检查通过，包含严格禁止访问原生注册接口、快速交替跳转、暂停恢复和连接生命周期检查；独立原生重放确认时间轴变化产生实际移动，并覆盖暂停跳转与首次同步。复现源码见 tests/timeline-seek.test.cjs、tests/state-replay.test.cpp 和 tests/state-replay.cjs。此次未运行整套回归，未更新商店；原版进度恢复需完全退出并重新启动网易云后确认，只重开小窗不能清除旧版可能留下的事件入口状态。

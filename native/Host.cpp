@@ -491,8 +491,17 @@ class App {
   coverQueue=std::make_shared<CoverQueue>();auto queue=coverQueue;HWND window=hwnd;
   std::thread([queue,window]{for(;;){std::wstring url;uint64_t epoch;
    {std::unique_lock<std::mutex> lock(queue->mutex);queue->changed.wait(lock,[&]{return queue->stop||queue->pending;});if(queue->stop)return;url=queue->url;epoch=queue->epoch;queue->pending=false;}
-   auto result=downloadCover(url,epoch);
-   {std::lock_guard<std::mutex> lock(queue->mutex);if(queue->stop)return;if(queue->pending&&queue->epoch!=epoch)continue;}
+   std::unique_ptr<CoverData> result;bool superseded=false;
+   for(int attempt=0;attempt<3;attempt++){
+    result=downloadCover(url,epoch);
+    std::unique_lock<std::mutex> lock(queue->mutex);
+    if(queue->stop)return;if(queue->epoch!=epoch){superseded=true;break;}
+    if(!result->pixels.empty()||url.empty()||attempt==2)break;
+    // Retry the same request, but wake immediately when a new cover or shutdown arrives.
+    queue->changed.wait_for(lock,std::chrono::milliseconds(attempt==0?1000:3000),[&]{return queue->stop||queue->epoch!=epoch;});
+    if(queue->stop)return;if(queue->epoch!=epoch){superseded=true;break;}
+   }
+   if(superseded)continue;
    if(PostMessageW(window,CoverReady,0,reinterpret_cast<LPARAM>(result.get())))result.release();
   }}).detach();
  }
@@ -519,8 +528,12 @@ class App {
    if(seekRequest&&uint64_t(m["seekRequest"].n())!=seekRequest)return;
    auto seekState=m["seekState"].s();if(seekPending&&seekState!="pending"&&seekState!="confirmed"&&seekState!="failed")return;
    if(seekState=="confirmed"||seekState=="failed")cancelSeek();
-   double incoming=std::max(0.,m["position"].n());if(valid&&std::abs(incoming-current())>1500&&flight.rows.empty())snapRow=true;
-   position=incoming;anchor=nowMs();playing=m["playing"].b();valid=m["valid"].b();offset=m["offset"].n();if(m["duration"].n()>0)duration=m["duration"].n();update();report("host-state");}
+   double incoming=std::max(0.,m["position"].n());bool changed=std::abs(incoming-current())>1500;
+   bool animate=valid&&m["valid"].b()&&seekState!="failed"&&seekState!="pending"&&(changed||seekState=="confirmed");
+   playing=m["playing"].b();offset=m["offset"].n();if(m["duration"].n()>0)duration=m["duration"].n();
+   // Retain the displayed geometry before accepting the new playback anchor.
+   if(animate)seekTo(incoming);else{if(valid&&changed&&flight.rows.empty())snapRow=true;position=incoming;anchor=nowMs();}
+   valid=m["valid"].b();update();report("host-state");}
   else if(type=="style"){int curve=int(clamp(m["curve"].n(),0,3));bool wave=m["stagger"].b(true);if(curve!=lineCurve||wave!=stagger){lineCurve=curve;stagger=wave;layoutDirty=true;update();}}
   else if(type=="font"){if(m["size"].kind==Json::Number)setLyricFontSize(m["size"].n());report("host-state");}
   else if(type=="background"){if(readBackground(m)){save();update();}report("background-state");}

@@ -8,22 +8,28 @@ function fixture(options={}){
   addEventListener:(name,fn)=>apiEvents.set(name,fn),removeEventListener:name=>apiEvents.delete(name),
   seekTo:ms=>{seeks.push(ms);return seekHandler?.(ms);},
   play:()=>controls.push('play'),pause:()=>controls.push('pause'),next:()=>controls.push('next'),previous:()=>controls.push('previous')};
- class WS{constructor(){lastSocket=this;this.readyState=0;queueMicrotask(()=>{if(++connections<=(options.failConnections??0)){this.readyState=3;this.onerror?.();}else{this.readyState=1;this.onopen?.();}});}send(s){sent.push(JSON.parse(s));}close(){this.readyState=3;this.onclose?.();}}
+ const sockets=[];
+ class WS{constructor(){lastSocket=this;this.readyState=0;sockets.push(this);if(!options.delaySockets)queueMicrotask(()=>this.connect());}
+  connect(){if(this.readyState!==0)return;if(++connections<=(options.failConnections??0)){this.readyState=3;this.onerror?.();}else{this.readyState=1;this.onopen?.();}}
+  send(s){sent.push(JSON.parse(s));}close(){this.readyState=3;this.onclose?.();}}
+ const nativeEvents=new Map();
+ const nativeBridge={appendRegisterCall:(name,namespace,fn)=>{const key=namespace+'.'+name;const set=nativeEvents.get(key)??new Set();set.add(fn);nativeEvents.set(key,set);},removeRegisterCall:(name,namespace,fn)=>nativeEvents.get(namespace+'.'+name)?.delete(fn)};
  const add=(name,fn)=>events.set(name,fn),remove=name=>events.delete(name);
  const context={console,performance:{now:()=>now},crypto:require('node:crypto').webcrypto,Uint8Array,WebSocket:WS,
   setTimeout:(fn,ms)=>{const id=++nextTimer;timers.set(id,{at:now+ms,fn});return id;},clearTimeout:id=>timers.delete(id),
   plugin:{pluginPath:'C:/test/plugin',onLoad:fn=>load=fn,onConfig:fn=>configure=fn,getConfig:(key,fallback)=>savedConfig[key]??fallback,setConfig:(key,value)=>savedConfig[key]=JSON.parse(JSON.stringify(value))},loadedPlugins:{},
-  betterncm:{app:{exec:async command=>{launches.push(command);return true;}}},
+  betterncm:{app:{exec:async command=>{launches.push(command);return options.exec?options.exec(command):true;}}},
   document:{createElement:tag=>({tagName:tag,style:{},children:[],textContent:'',append(...children){this.children.push(...children);}}),addEventListener:add,removeEventListener:remove,getElementById:()=>{throw Error('Redux access removed');},querySelector:()=>{throw Error('DOM player access removed');}},
   channel:{call:options.channelCall??(()=>{throw Error('native API access removed');})},fetch:()=>{throw Error('online lyrics removed');},
   localStorage:{getItem:key=>options.storage?.[key]??(key==='refined-now-playing-lyric-offset'?options.offset??null:null)},addEventListener:add,removeEventListener:remove};
  context.document.body={classList:{contains:name=>(options.classes??[]).includes(name)}};
+ if(!options.noNativeEvents)context.legacyNativeCmder=nativeBridge;
  context.window=context;if(!options.noApi)context.InfLinkApi=api;
  context.currentLyrics=options.rnp??{hash:'123-999',lyrics:[{time:0,originalLyric:'first'},{time:12000,originalLyric:'next'}]};
  vm.createContext(context);vm.runInContext(fs.readFileSync(path.join(__dirname,'../main.js'),'utf8'),context);load();
  function advance(ms){const target=now+ms;let count=0;while(true){const entry=[...timers].filter(([,t])=>t.at<=target).sort((a,b)=>a[1].at-b[1].at)[0];if(!entry)break;if(++count>1000)throw Error('timer loop');now=entry[1].at;timers.delete(entry[0]);entry[1].fn();}now=target;}
  const emitTimeline=(ms,state=playback)=>{snapshot={currentTime:ms,totalTime:90000};playback=state;apiEvents.get('timelineUpdate')?.({detail:snapshot});};
- return {context,api,sent,seeks,launches,controls,events,apiEvents,advance,emitTimeline,savedConfig,config:()=>configure(),closeSocket:()=>lastSocket.close(),hostMessage:m=>lastSocket.onmessage({data:JSON.stringify(m)}),
+ return {sockets,emitNativeSeek:(seconds,id='native-1',playId='123',code=0)=>{for(const fn of [...nativeEvents.get('audioplayer.Seek')??[]])fn(playId,id,code,seconds);},nativeEvents,context,api,sent,seeks,launches,controls,events,apiEvents,advance,emitTimeline,savedConfig,config:()=>configure(),closeSocket:()=>lastSocket.close(),hostMessage:m=>lastSocket.onmessage({data:JSON.stringify(m)}),
   info:()=>info,setInfo:value=>info=value,setSnapshot:ms=>snapshot={currentTime:ms,totalTime:90000},
   setSeek:fn=>seekHandler=fn,emitPlay:state=>{playback=state;apiEvents.get('playStateChange')?.({detail:state});},
   emitRnp:d=>{context.currentLyrics=d;events.get('lyrics-updated')?.({detail:d});},
