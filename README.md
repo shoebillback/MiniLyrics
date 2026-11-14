@@ -1,6 +1,6 @@
 # MiniLyrics
 
-基于 BetterNCM 与 RefinedNowPlayingNext 的 Windows 原生桌面歌词小窗。当前版本 **0.7.9**，作者 **shoebillback**。
+基于 BetterNCM 与 RefinedNowPlayingNext 的 Windows 原生桌面歌词小窗。当前版本 **0.7.9**。
 
 ## 功能
 
