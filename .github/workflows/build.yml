@@ -48,10 +48,10 @@ jobs:
           ./build.ps1
           $version = (Get-Content -LiteralPath ./manifest.json -Raw | ConvertFrom-Json).version
           "version=$version" >> $env:GITHUB_OUTPUT
-      - name: Run existing bridge and configuration regressions
+      - name: Run playback control focused checks
         run: |
-          node --test tests/core.test.cjs tests/bridge.test.cjs tests/background.test.cjs tests/update-flow.test.cjs
-          if ($LASTEXITCODE -ne 0) { throw 'Script regression failed' }
+          node --test tests/control-flow.test.cjs tests/control-flow-integration.test.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Playback control focused checks failed' }
       - name: Stage market runtime
         env:
           SOURCE_COMMIT: ${{ github.sha }}

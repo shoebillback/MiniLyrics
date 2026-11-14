@@ -14,7 +14,7 @@ if (!$SkipNativeBuild) {
 }
 if (!(Test-Path -LiteralPath (Join-Path $taskRoot 'MiniLyricsHost.exe'))) { throw 'Native executable missing' }
 $version = ([IO.File]::ReadAllText((Join-Path $taskRoot 'manifest.json')) | ConvertFrom-Json).version
-$bundle = '(function(){' + "`n" + 'const MINILYRICS_VERSION=' + (ConvertTo-Json $version -Compress) + ';' + "`n" + [IO.File]::ReadAllText((Join-Path $taskRoot 'core.js')) + "`n" + [IO.File]::ReadAllText((Join-Path $taskRoot 'plugin.js')) + "`n" + '})();'
+$bundle = '(function(){' + "`n" + 'const MINILYRICS_VERSION=' + (ConvertTo-Json $version -Compress) + ';' + "`n" + [IO.File]::ReadAllText((Join-Path $taskRoot 'core.js')) + "`n" + [IO.File]::ReadAllText((Join-Path $taskRoot 'player.js')) + "`n" + [IO.File]::ReadAllText((Join-Path $taskRoot 'plugin.js')) + "`n" + '})();'
 [IO.File]::WriteAllText((Join-Path $taskRoot 'main.js'),$bundle,(New-Object Text.UTF8Encoding $false))
 $outputDir = $OutputDirectory
 New-Item -ItemType Directory -Force $outputDir | Out-Null
@@ -26,7 +26,7 @@ $zip = [IO.Compression.ZipFile]::Open($packagePath,[IO.Compression.ZipArchiveMod
 try {
  # Include runtime files and the complete corresponding source for GPL distribution.
  $files = @('manifest.json','main.js','MiniLyricsHost.exe','LICENSE','THIRD_PARTY.md',
-  'README.md','CHANGELOG.md','preview.png','core.js','plugin.js','build.ps1')
+  'README.md','CHANGELOG.md','preview.png','core.js','player.js','plugin.js','build.ps1')
  foreach ($directory in @('native','tests','licenses')) {
   $files += Get-ChildItem -LiteralPath (Join-Path $taskRoot $directory) -File -Recurse |
    Where-Object { $_.Extension -in @('.cpp','.hpp','.cjs','.ps1','.md','.txt') } |

@@ -1,22 +1,25 @@
 (function(){
-const MINILYRICS_VERSION="0.6.33";
+const MINILYRICS_VERSION="0.7.8";
 /* MiniLyrics, GPL-3.0-or-later. Pure normalization shared by plugin and tests. */
 (function (root) {
   'use strict';
   const finite = (x, fallback = 0) => Number.isFinite(Number(x)) ? Number(x) : fallback;
-  function normalizeLines(input) {
+  function normalizeLines(input, options = {}) {
     if (!Array.isArray(input)) return [];
-    return input.slice(0, 5000).filter(l => l && typeof l==='object').map(l => {
+    const lines = input.slice(0, 5000).filter(l => l && typeof l==='object').map(l => {
       const time = Math.max(0, finite(l.time ?? l.startTime ?? l.start));
-      const text = String(l.originalLyric ?? l.lyric ?? l.text ?? l.content ?? '');
+      let text = String(l.originalLyric ?? l.lyric ?? l.text ?? l.content ?? '');
       const words = (Array.isArray(l.dynamicLyric) ? l.dynamicLyric : []).slice(0, 500).filter(w => w && typeof w==='object').map(w => {
         const t = finite(w.time);
-        return {text: String(w.word ?? w.text ?? ''), time: t >= time - 1000 ? t : time + t,
+        return {text: String(w.word ?? w.text ?? ''), time: options.wordTiming === 'relative' ? time + t : t,
           duration: Math.max(1, finite(w.duration, 1))};
       });
-      return {time, duration: Math.max(0, finite(l.duration)), text, isInterlude: !!l.isInterlude || text === '',
-        translation: String(l.translatedLyric ?? l.translation ?? ''), words};
-    }).sort((a,b) => a.time-b.time);
+      if (!text) text = words.map(w => w.text).join('');
+      const translation = String(l.translatedLyric ?? l.translation ?? '');
+      return {time, duration: Math.max(0, finite(l.duration)), text, isInterlude: !!l.isInterlude || (!text && !translation),
+        translation, words};
+    });
+    return options.unsynced ? lines : lines.sort((a,b) => a.time-b.time);
   }
   function metadata(info) {
     if(!info || typeof info!=='object') return null;
@@ -66,7 +69,7 @@ const MINILYRICS_VERSION="0.6.33";
       if(inferred&&now-lastMotionAt>=2000){inferred=false;run=null;}
       output=inferred;return output;
     }
-    return {sample,event:value=>report(value,true),reset,resetProgress:()=>{point=null;run=null;},
+    return {sample,event:value=>report(value,true),reset,resetProgress:()=>{point=null;run=null;inferred=false;lastMotionAt=-Infinity;output=reported===true;},
       current:()=>output,snapshot:()=>({reportedPlaying:reported,playing:output,inferredFromProgress:inferred,
         progressSamples:run?.steps??0})};
   }
@@ -74,18 +77,243 @@ const MINILYRICS_VERSION="0.6.33";
   if(typeof module!=='undefined') module.exports=api; else root.MiniLyricsCore=api;
 })(typeof window!=='undefined'?window:globalThis);
 
+/* MiniLyrics — GPL-3.0-or-later. NCM 3.x playback boundary; no shared function patches. */
+(function(root){
+  'use strict';
+  function createPlayerAdapter(env=root){
+    let store=null,bridge=null,nativeAdapter=null,unsubscribe=null,disposed=false,starting=false,retry=null;
+    let song=null,status='Paused',timeline=null,sequence=0,lastStoreState=null;
+    const events=new Map(),bindings=new Map(),eventNames=['PlayProgress','Seek','PlayState'];
+    const now=()=>env.performance?.now?.()??Date.now();
+    let lastAcceptedProgressAt=null,lastAcceptedSeekAt=null,bridgeSource=null;
+    let audioPlayerAvailable=false,canQueueLoadingSeek=false,startTarget=null,resumeTrack=null,startFlushScheduled=false,controlSerial=0,lastControl=null;
+    const sessionReady=p=>!!p?.playId&&!p.restoreResource&&!p.isLoadingFirst;
+    function controlState(){
+      const p=store?.getState()?.playing;
+      return {phase:!p?'unavailable':p.isLoadingFirst?'loading':p.restoreResource?'restoring':p.playId?'loaded':'idle',
+        hasPlayId:!!p?.playId,audioPlayerAvailable,canQueueLoadingSeek,pendingTargetMs:startTarget?.target??null,
+        lastCommand:lastControl?{...lastControl}:null};
+    }
+    function cancelSeek(requestId,resetStart=false){
+      if(requestId==null||startTarget?.requestId===requestId)startTarget=null;
+      if(resetStart)resumeTrack=null;
+    }
+    function scheduleStartupSeek(){
+      if(disposed||!startTarget||startFlushScheduled||!sessionReady(store?.getState()?.playing))return;
+      startFlushScheduled=true;
+      // Finish the current native/store event fanout before issuing a seek.
+      // This is an ordering boundary, not a timed guess about readiness.
+      Promise.resolve().then(()=>{
+        startFlushScheduled=false;const own=startTarget,p=store?.getState()?.playing;
+        if(disposed||!own||!sessionReady(p))return;
+        if(String(p.resourceTrackId)!==own.trackId){startTarget=null;return;}
+        startTarget=null;resumeTrack=null;
+        lastControl={action:'seek',route:'loaded-after-start',targetMs:own.target,at:now()};
+        try{dispatch('playing/setPlayingPosition',{duration:own.target/1000});}
+        catch(e){lastControl.error='seek-dispatch-failed';emit('controlError',{requestId:own.requestId,songId:own.trackId,reason:'播放器跳转失败'});}
+      });
+    }
+    const nativeStats=Object.fromEntries(eventNames.map(name=>[name,{received:0,accepted:0,filtered:0,lastReceivedAt:null,lastAcceptedAt:null,lastSongId:null,lastOutcome:null,lastFilterReason:null}]));
+    function receive(name,id){
+      const event=nativeStats[name];event.received++;event.lastReceivedAt=now();event.lastSongId=id==null?null:String(id).slice(0,256);event.lastOutcome='received';return event;
+    }
+    function outcome(event,reason=null){
+      event.lastOutcome=reason?'filtered':'accepted';event.lastFilterReason=reason;
+      if(reason)event.filtered++;else{event.accepted++;event.lastAcceptedAt=now();}
+    }
+    function diagnostics(){
+      const subscriptions=Object.fromEntries(eventNames.map(name=>{
+        const own=bindings.get(name),entry=nativeAdapter?.registerCallMap?.['audioplayer.on'+name];
+        const active=!!own&&(entry===own||Array.isArray(entry)&&entry.includes(own));
+        return [name,active?'subscribed':own?'lost':'waiting'];
+      }));
+      const canControl=!!store&&!disposed,progress=nativeStats.PlayProgress;
+      const streamState=!canControl?'waiting-player':subscriptions.PlayProgress==='lost'?'subscription-lost':subscriptions.PlayProgress!=='subscribed'?'waiting-subscription':
+        progress.lastOutcome==='filtered'?'events-filtered':lastAcceptedProgressAt===null?'waiting-progress':status==='Playing'&&now()-lastAcceptedProgressAt>=4500?'progress-stalled':status==='Playing'?'progress-live':'progress-paused';
+      return {canControl,bridgeSource,originalInitialization:'unverified',subscriptions,streamState,
+        hasActualProgress:lastAcceptedProgressAt!==null,lastReceivedProgressAt:progress.lastReceivedAt,lastAcceptedProgressAt,lastAcceptedSeekAt,
+        progressAgeMs:lastAcceptedProgressAt===null?null:Math.max(0,now()-lastAcceptedProgressAt),
+        timelineSource:timeline?.source??null,control:controlState(),events:Object.fromEntries(eventNames.map(name=>[name,{...nativeStats[name]}]))};
+    }
+    const emit=(name,detail)=>{for(const fn of [...events.get(name)??[]])try{fn({detail});}catch(e){env.console?.warn('[MiniLyrics] 播放订阅处理失败',e);}};
+    const readSong=()=>{
+      const state=store.getState(),p=state?.playing;if(!p?.resourceTrackId)return null;
+      const voice=state['page:vinylPage']?.currentVoice;
+      if(p.resourceType==='voice'&&(!voice||String(voice.id)!==String(p.onlineResourceId)))return null;
+      const v=p.resourceType==='voice'?voice:null;
+      const online=v?.id??p.onlineResourceId??p.resourceTrackId;
+      return {trackId:String(p.resourceTrackId),ncmId:/^\d+$/.test(String(online))?Number(online):0,
+        songName:v?.name??p.resourceName??'',authorName:(v?.track?.artists??p.resourceArtists??[]).map(a=>a.name).join(' / '),
+        cover:{url:v?.coverUrl??p.resourceCoverUrl??''},duration:Math.max(0,Number(v?.duration??p.curTrack?.duration)||0)};
+    };
+    function sync(){
+      if(disposed||!store)return;
+      bindEvents();
+      const next=readSong();if(!next)return;
+      const changed=next.trackId!==song?.trackId,meta=JSON.stringify(next)!==JSON.stringify(song);
+      if(changed){timeline=null;sequence++;lastStoreState=null;lastAcceptedProgressAt=null;lastAcceptedSeekAt=null;cancelSeek(null,true);}
+      song=next;
+      // Redux uses 2 for playing; native PlayState uses a different enum.
+      const state=store.getState()?.playing?.playingState;
+      const known=[-1,0,1,2].includes(state),nextStatus=state===2?'Playing':'Paused';
+      const stateChanged=known&&(changed||state!==lastStoreState);
+      if(stateChanged){status=nextStatus;lastStoreState=state;}
+      if(timeline)timeline={...timeline,totalTime:song.duration};
+      if(meta)emit('songChange',song);
+      if(stateChanged)emit('playStateChange',status);
+      if(sessionReady(store.getState()?.playing))resumeTrack=null;
+      scheduleStartupSeek();
+    }
+    function matches(id){
+      if(!song||String(store?.getState()?.playing?.resourceTrackId)!==song.trackId||id==null||id==='')return false;
+      const value=String(id).toLowerCase();
+      return [song.trackId,song.ncmId>0?String(song.ncmId):''].filter(Boolean).some(key=>{
+        key=key.toLowerCase();return value===key||value.startsWith(key+'_')||value.startsWith(key+'|');
+      });
+    }
+    function progress(id,seconds,seek=false,source=seek?'seek':'progress',code=0){
+      const name=source==='progress'?'PlayProgress':source==='seek'?'Seek':null,event=name?receive(name,id):null;
+      sync();
+      const reason=!song?'no-song':!matches(id)?'song-mismatch':seek&&code!==0?'seek-failed':typeof seconds!=='number'||!Number.isFinite(seconds)||seconds<0?'invalid-time':null;
+      if(event)outcome(event,reason);if(reason)return;
+      if(source==='progress')lastAcceptedProgressAt=now();else if(source==='seek')lastAcceptedSeekAt=now();
+      timeline={songId:song.trackId,currentTime:seconds*1000,totalTime:song.duration,sequence:++sequence,seek,source,receivedAt:event?.lastReceivedAt??null};
+      if(source!=='restore'&&startTarget?.trackId===song.trackId&&Math.abs(timeline.currentTime-startTarget.target)<=250)startTarget=null;
+      emit('timelineUpdate',timeline);
+    }
+    const isolate=(fn,name)=>(...args)=>{if(disposed)return;try{return fn(...args);}catch(e){if(name)outcome(nativeStats[name],'callback-error');env.console?.warn('[MiniLyrics] 播放回调失败，已隔离',e);}};
+    function bind(name,fn){
+      const entry=nativeAdapter?.registerCallMap?.['audioplayer.on'+name],current=bindings.get(name);
+      if(current&&Array.isArray(entry)&&entry.includes(current))return;
+      // APPEND reserves an absent event and can reject the player's later first
+      // registration. Only join an existing callback; never create an empty slot.
+      const existing=Array.isArray(entry)?entry.some(cb=>typeof cb==='function'&&cb!==current):typeof entry==='function'&&entry!==current;
+      if(!existing)return;
+      const callback=current??isolate(fn,name);
+      bridge.appendRegisterCall(name,'audioplayer',callback);bindings.set(name,callback);
+    }
+    function bindEvents(){
+      if(disposed||!bridge)return;
+      bind('PlayProgress',(id,seconds)=>progress(id,seconds));
+      bind('Seek',(id,request,code,seconds)=>progress(id,seconds,true,'seek',code));
+      bind('PlayState',(id,request,value)=>{
+        const event=receive('PlayState',id);sync();
+        const reason=!matches(id)?'song-mismatch':![0,1,2,4].includes(value)?'invalid-state':null;
+        outcome(event,reason);if(reason)return;
+        status=value===1?'Playing':'Paused';emit('playStateChange',status);
+      });
+    }
+    function release(){
+      unsubscribe?.();unsubscribe=null;
+      for(const [name,fn]of bindings)try{bridge.removeRegisterCall(name,'audioplayer',fn);}catch(e){env.console?.warn('[MiniLyrics] 清理播放订阅失败',e);}
+      bindings.clear();store=null;bridge=null;nativeAdapter=null;
+    }
+    function find(require,predicate){
+      for(const module of Object.values(require.c??{})){const e=module?.exports;for(const candidate of [e,e?.default])if(candidate&&predicate(candidate))return candidate;}
+      return null;
+    }
+    function initialize(require){
+      if(disposed)return;
+      const dva=find(require,e=>e.a?.app?._store?.getState&&e.a.app._store.subscribe&&e.a.app._store.dispatch);
+      // Like InfLink's V3 adapter, resolve AudioPlayer before subscribing through Bridge.
+      audioPlayerAvailable=!!find(require,e=>typeof e.AudioPlayer?.subscribePlayStatus==='function');
+      const model=dva?.a.app._models?.find(m=>m.namespace==='playing'),reducers=model?.reducers;
+      canQueueLoadingSeek=typeof (reducers?.['playing/onLoadingSeekUpdate']??reducers?.onLoadingSeekUpdate)==='function';
+      const native=find(require,e=>typeof e.Bridge?.appendRegisterCall==='function'&&typeof e.Bridge?.removeRegisterCall==='function')?.Bridge;
+      const selected=native??env.legacyNativeCmder,adapter=selected?._Adapter??selected?._envAdapter;
+      if(!dva||!adapter?.registerCallMap||typeof selected?.appendRegisterCall!=='function'||typeof selected?.removeRegisterCall!=='function')return;
+      store=dva.a.app._store;bridge=selected;nativeAdapter=adapter;bridgeSource=native?'internal':'legacy';
+      try{
+        sync();unsubscribe=store.subscribe(isolate(sync));
+        // Event binding is retried by sync/polling after native initialization.
+        // Restore only a matching startup snapshot, never overwrite a newer event.
+        const storage=find(require,e=>typeof e.b?.lastPlaying?.get==='function')?.b;
+        const initial=sequence,id=song?.trackId;
+        Promise.resolve(storage?.lastPlaying.get()).then(saved=>{
+          if(disposed||sequence!==initial||song?.trackId!==id||String(saved?.trackId)!==id)return;
+          progress(id,saved.current,false,'restore');
+        }).catch(()=>{});
+      }catch(e){release();throw e;}
+    }
+    function start(){
+      if(disposed||store||starting)return;
+      starting=true;
+      try{
+        const chunks=env.webpackJsonp;
+        if(chunks?.push){
+          const key='minilyrics_player_'+Date.now()+'_'+Math.random().toString(36).slice(2);
+          const modules={[key]:(module,exports,require)=>initialize(require)};
+          chunks.push(chunks[0]&&Array.isArray(chunks[0])?[[key],modules,[[key]]]:[[key],modules]);
+        }
+      }catch(e){env.console?.debug('[MiniLyrics] 等待播放器就绪',e);}
+      finally{starting=false;if(!disposed&&!store)retry=env.setTimeout(start,1000);}
+    }
+    function dispatch(type,payload){
+      if(disposed||!store)return false;
+      store.dispatch({type,payload});
+      // A synchronous first seek may initialize native callbacks without a store
+      // notification. Join them now; a confirmation already missed is not replayed.
+      bindEvents();
+      return true;
+    }
+    function seekTo(ms,requestId){
+      if(disposed||!store||!Number.isFinite(ms)||ms<0)return false;
+      sync();const p=store.getState()?.playing,trackId=String(p?.resourceTrackId??'');
+      if(!trackId||trackId!==song?.trackId)return false;
+      if(sessionReady(p)){
+        cancelSeek();lastControl={action:'seek',route:'loaded',targetMs:ms,at:now()};
+        return dispatch('playing/setPlayingPosition',{duration:ms/1000});
+      }
+      // The live NCM effects queue positions in restoreResource/current or
+      // loadingSeekDuration. Never send an idle session's missing playId to seek.
+      const needsLoadingQueue=!p.restoreResource&&!p.isLoadingFirst;
+      const clearZeroFallback=!!p.restoreResource&&ms===0&&Number(p.loadingSeekDuration)>0;
+      if((!p.isLoadingFirst&&!p.curPlaying)||((needsLoadingQueue||clearZeroFallback)&&!canQueueLoadingSeek)){
+        lastControl={action:'seek',route:'unavailable',targetMs:ms,at:now()};return false;
+      }
+      const own={requestId:requestId??++controlSerial,trackId,target:ms};startTarget=own;
+      lastControl={action:'seek',route:'queued-start',targetMs:ms,at:now()};
+      try{
+        if(p.restoreResource||p.isLoadingFirst)dispatch('playing/setPlayingPosition',{duration:ms/1000});
+        else dispatch('playing/onLoadingSeekUpdate',{loadingSeekDuration:ms/1000});
+        // nativePlay uses restore.current || loadingSeekDuration: zero must
+        // also clear an older loading target rather than fall back to it.
+        if(clearZeroFallback)dispatch('playing/onLoadingSeekUpdate',{loadingSeekDuration:0});
+        if(!p.isLoadingFirst&&resumeTrack!==trackId){resumeTrack=trackId;dispatch('playing/resume',{triggerScene:'desktopLyric'});}
+        scheduleStartupSeek();return true;
+      }catch(e){cancelSeek(own.requestId,true);throw e;}
+    }
+    function playbackControl(type,payload){
+      cancelSeek(null,true);lastControl={action:type,route:'original-model',at:now()};return dispatch(type,payload);
+    }
+    const api={version:'ncm3-v3',get ready(){return !!store&&!disposed;},getDiagnostics:diagnostics,
+      getCurrentSong:()=>{sync();return song;},getPlaybackStatus:()=>status,getTimeline:()=>{bindEvents();scheduleStartupSeek();return timeline;},
+      addEventListener:(name,fn)=>{if(!events.has(name))events.set(name,new Set());events.get(name).add(fn);},
+      removeEventListener:(name,fn)=>events.get(name)?.delete(fn),
+      play:()=>playbackControl('playing/resume',{triggerScene:'desktopLyric'}),pause:()=>playbackControl('playing/pause',{triggerScene:'desktopLyric'}),
+      togglePlay:()=>playbackControl('playing/switchResumeOrPause',{triggerScene:'desktopLyric'}),
+      next:()=>playbackControl('playingList/jump2Track',{flag:1,type:'call',triggerScene:'hotKey'}),
+      previous:()=>playbackControl('playingList/jump2Track',{flag:-1,type:'call',triggerScene:'hotKey'}),
+      seekTo,cancelSeek,
+      dispose:()=>{cancelSeek(null,true);disposed=true;env.clearTimeout(retry);release();events.clear();timeline=null;song=null;}};
+    start();return api;
+  }
+  if(typeof module!=='undefined')module.exports={createPlayerAdapter};else root.MiniLyricsPlayer={createPlayerAdapter};
+})(typeof window!=='undefined'?window:globalThis);
+
 /* MiniLyrics — GPL-3.0-or-later. */
 (() => {
   'use strict';
   window.__miniLyrics?.dispose();
+  const playerAdapter=window.MiniLyricsPlayer.createPlayerAdapter();
   const C=window.MiniLyricsCore,listeners=[],rnpCache=new Map(),playback=C.createPlaybackState();
   const STALE_MS=4500,SEEK_TIMEOUT_MS=2500,SEEK_TOLERANCE_MS=1500;
   let socket=null,timer=null,stopped=false,session=0,busy=false;
   let windowSession=null,reconnectTimer=null;
-  let infLink=null,detachInfLink=null,song={id:'',ncmId:'',duration:0},lines=[];
+  let player=null,detachPlayer=null,song={id:'',ncmId:'',duration:0},lines=[];
   let position=0,anchor=performance.now(),playing=false,clockValid=false,offset=0;
-  let infPosition=null,infPlaying=null,infAdvancedAt=0,hostState=null;
-  let lastMeta='',lastLyrics='',lyricRevision=0,lastRnp=null,lastAppliedRnp=null;
+  let sourcePosition=null,sourcePlaying=null,sourceKind=null,sourceAdvancedAt=0,hostState=null;
+  let lastMeta='',lastLyrics='',lyricMode='waiting',lyricRevision=0,lastRnp=null,lastAppliedRnp=null;
   let pendingSeek=null,seekTimer=null,lastSeekId=0;
   let status='小窗未启动',statusView=null,lastRnpStyle='';
   const normalizeFontSize=value=>Number.isFinite(Number(value))&&value!==''?Math.max(14,Math.min(36,Math.round(Number(value)))):21;
@@ -122,10 +350,12 @@ const MINILYRICS_VERSION="0.6.33";
   function setLyrics(d,force=false){
     if(d===lastAppliedRnp&&!force)return;
     if(!aliases().has(providerId(d))||!Array.isArray(d?.lyrics))return;
-    const normalized=C.normalizeLines(d.lyrics),signature=JSON.stringify(normalized);lastAppliedRnp=d;
+    const unsynced=!!d.unsynced||d.lyrics.some(l=>l&&l.unsynced===true);
+    const normalized=C.normalizeLines(d.lyrics,{unsynced}),mode=normalized.length?(unsynced?'untimed':'timed'):'empty';
+    const signature=JSON.stringify({mode,lines:normalized});lastAppliedRnp=d;
     if(signature===lastLyrics)return;
-    lines=normalized;lastLyrics=signature;
-    send({type:'lyrics',songId:song.id,revision:++lyricRevision,lines});refreshStatus();
+    lines=normalized;lyricMode=mode;lastLyrics=signature;
+    send({type:'lyrics',songId:song.id,revision:++lyricRevision,mode:lyricMode,lines});refreshStatus();
   }
   function recoverLyrics(update){
     const snapshot=window.currentLyrics;
@@ -140,14 +370,14 @@ const MINILYRICS_VERSION="0.6.33";
     let stagger=true;try{const value=window.localStorage?.getItem('refined-now-playing-lyric-stagger');stagger=value!=='false'&&value!=='0';}catch{}
     const signature=curve+':'+stagger;if(force||signature!==lastRnpStyle){lastRnpStyle=signature;send({type:'style',curve,stagger});}
   }
-  function clearSeek(){clearTimeout(seekTimer);seekTimer=null;pendingSeek=null;}
+  function clearSeek(){clearTimeout(seekTimer);seekTimer=null;const own=pendingSeek;pendingSeek=null;if(own)player?.cancelSeek?.(own.id);}
   function syncSong(){
-    let info;try{info=infLink?.getCurrentSong?.();}catch{return false;}
+    let info;try{info=player?.getCurrentSong?.();}catch{return false;}
     const next=C.metadata(info);if(!next)return false;
     if(next.id!==song.id){
       clearSeek();lastSeekId=0;playback.reset();
       position=0;anchor=performance.now();clockValid=false;
-      infPosition=null;infPlaying=null;lines=[];lastLyrics='[]';lastAppliedRnp=null;hostState=null;
+      sourcePosition=null;sourcePlaying=null;sourceKind=null;lines=[];lastLyrics='';lyricMode='waiting';lastAppliedRnp=null;hostState=null;
     }
     song=next;const signature=JSON.stringify(song);
     if(signature!==lastMeta){lastMeta=signature;send({type:'track',...song});}
@@ -157,42 +387,43 @@ const MINILYRICS_VERSION="0.6.33";
     send({type:'clock',songId:song.id,position:live(),playing,valid:clockValid,
       duration:song.duration,offset,seekRequest:lastSeekId,seekState});refreshStatus();
   }
-  function infTimelineFresh(){
-    return !!infLink&&infPosition!==null&&(infPlaying===false||performance.now()-infAdvancedAt<STALE_MS);
+  function playerTimelineFresh(){
+    return !!player&&clockValid&&sourcePosition!==null&&(sourcePlaying===false||performance.now()-sourceAdvancedAt<STALE_MS);
   }
   function acceptTimeline(t,api,playbackStatus){
-    if(api!==infLink||!song.id||t?.currentTime==null||!Number.isFinite(Number(t.currentTime)))return false;
-    const next=Math.max(0,Number(t.currentTime)),now=performance.now();
+    if(api!==player||!song.id||(t?.songId&&t.songId!==song.id)||t?.currentTime==null||!Number.isFinite(Number(t.currentTime)))return false;
+    const next=Math.max(0,Number(t.currentTime)),now=performance.now(),kind=t.source??'progress',actual=kind!=='restore';
     const state=playbackStatus===undefined?api.getPlaybackStatus?.():playbackStatus;
     const nextPlaying=playback.sample(next,now,state,!!pendingSeek);
     let seekState=pendingSeek?'pending':'';
-    if(pendingSeek){
+    if(pendingSeek&&actual){
       const expected=pendingSeek.target+(nextPlaying?Math.max(0,now-pendingSeek.started):0);
       // Actual position is authoritative, including an external seek that supersedes ours.
-      if(Math.abs(next-expected)<=250||Math.abs(next-live())>SEEK_TOLERANCE_MS){clearSeek();seekState='confirmed';}
+      const reached=pendingSeek.startup?next>=pendingSeek.target-250&&next<=pendingSeek.target+(nextPlaying?Math.max(0,now-pendingSeek.started):0)+250:Math.abs(next-expected)<=250;
+      if((pendingSeek.sequence===undefined||t.sequence!==pendingSeek.sequence)&&(reached||!pendingSeek.startup&&(t.seek||Math.abs(next-live())>SEEK_TOLERANCE_MS))){clearSeek();seekState='confirmed';}
     }
-    if(next===infPosition&&nextPlaying===infPlaying&&seekState!=='confirmed')return false;
-    infPosition=next;infPlaying=nextPlaying;infAdvancedAt=now;
-    position=next;anchor=now;playing=nextPlaying;clockValid=true;status='已连接';
+    if(next===sourcePosition&&nextPlaying===sourcePlaying&&kind===sourceKind&&seekState!=='confirmed')return false;
+    sourcePosition=next;sourcePlaying=nextPlaying;sourceKind=kind;sourceAdvancedAt=now;
+    position=next;anchor=now;playing=nextPlaying;clockValid=actual;status='已连接';
     if(Number(t.totalTime)>0)song.duration=Number(t.totalTime);
     sendClock(seekState);return true;
   }
   function sample(update,playbackStatus){
-    if(infLink)syncSong();recoverLyrics(update);
-    if(!infLink)return false;
-    try{return acceptTimeline(infLink.getTimeline(),infLink,playbackStatus);}catch(e){console.debug('[MiniLyrics] InfLink 时间轴暂不可用',e);return false;}
+    if(player)syncSong();recoverLyrics(update);
+    if(!player)return false;
+    try{return acceptTimeline(player.getTimeline(),player,playbackStatus);}catch(e){console.debug('[MiniLyrics] 网易云播放器 时间轴暂不可用',e);return false;}
   }
   function failSeek(own,reason){
     if(pendingSeek!==own)return;
-    clearSeek();playback.resetProgress();
+    player?.cancelSeek?.(own.id,true);clearSeek();playback.resetProgress();
     try{
-      const t=infLink?.getTimeline?.();
+      const t=player?.getTimeline?.();
       if(t?.currentTime!=null&&Number.isFinite(Number(t.currentTime))){
         position=Math.max(0,Number(t.currentTime));anchor=performance.now();
-        infPosition=position;infAdvancedAt=anchor;clockValid=true;
+        sourcePosition=position;sourceKind=t.source??'progress';sourceAdvancedAt=anchor;clockValid=sourceKind!=='restore';
       }else{position=own.previous;anchor=performance.now();clockValid=false;}
     }catch{position=own.previous;anchor=performance.now();clockValid=false;}
-    status=reason;sendClock('failed');
+    status=reason+(clockValid?'，已恢复进度':'，等待实际进度');sendClock('failed');
   }
   function seek(ms,requestId,requestSong){
     syncSong();recoverLyrics();if(requestSong&&requestSong!==song.id)return;
@@ -200,52 +431,54 @@ const MINILYRICS_VERSION="0.6.33";
     if(!Number.isFinite(target))return;
     lastSeekId=Number(requestId)||lastSeekId+1;
     clearSeek();playback.resetProgress();
-    const own={id:lastSeekId,songId:song.id,target,started:performance.now(),previous:live()};pendingSeek=own;
-    seekTimer=setTimeout(()=>failSeek(own,'跳转未确认，已恢复进度'),SEEK_TIMEOUT_MS);
+    const own={id:lastSeekId,songId:song.id,target,startup:!!player?.getDiagnostics?.()?.control&&player.getDiagnostics().control.phase!=='loaded',sequence:player?.getTimeline?.()?.sequence,started:performance.now(),previous:live()};pendingSeek=own;
+    seekTimer=setTimeout(()=>failSeek(own,'跳转未确认'),SEEK_TIMEOUT_MS);
     sendClock('pending');
     try{
-      if(typeof infLink?.seekTo!=='function')throw Error('InfLink 未就绪');
-      const result=infLink.seekTo(target);
-      if(result===false)failSeek(own,'InfLink 未接受跳转');
-      else if(result?.then)result.then(value=>{if(value===false)failSeek(own,'InfLink 未接受跳转');},
-        ()=>failSeek(own,'InfLink 跳转失败'));
-    }catch{failSeek(own,'InfLink 跳转失败');}
+      if(typeof player?.seekTo!=='function')throw Error('网易云播放器 未就绪');
+      const result=player.seekTo(target,own.id);
+      if(result===false)failSeek(own,'网易云播放器 未接受跳转');
+      else if(result?.then)result.then(value=>{if(value===false)failSeek(own,'网易云播放器 未接受跳转');},
+        ()=>failSeek(own,'网易云播放器 跳转失败'));
+    }catch{failSeek(own,'网易云播放器 跳转失败');}
   }
   function command(m){
     if(m.type!=='command')return;
     if(m.action==='seek')return seek(m.position,m.requestId,m.songId);
-    if(m.action==='play'){const action=playing?'pause':'play';if(action==='pause')playback.event('Paused');infLink?.[action]?.();return;}
-    if(m.action==='previous'||m.action==='next')infLink?.[m.action]?.();
+    if(m.action==='play'){if(player?.togglePlay)player.togglePlay();else player?.[player.getPlaybackStatus?.()==='Playing'?'pause':'play']?.();return;}
+    if(m.action==='previous'||m.action==='next')player?.[m.action]?.();
   }
-  function attachInfLink(){
-    const candidate=window.InfLinkApi,api=typeof candidate?.getCurrentSong==='function'&&typeof candidate?.getTimeline==='function'?candidate:null;
-    if(api===infLink){if(!api)status='等待 InfLink-rs';return;}
-    detachInfLink?.();detachInfLink=null;playback.reset();
+  function attachPlayer(){
+    const candidate=(playerAdapter.ready?playerAdapter:null),api=typeof candidate?.getCurrentSong==='function'&&typeof candidate?.getTimeline==='function'?candidate:null;
+    if(api===player){if(!api)status='等待 网易云播放器';return;}
+    detachPlayer?.();detachPlayer=null;playback.reset();
     const wasPending=pendingSeek;
-    infLink=api;
-    if(wasPending)failSeek(wasPending,'InfLink 连接变化，跳转已取消');
+    player=api;
+    if(wasPending)failSeek(wasPending,'网易云播放器 连接变化，跳转已取消');
     position=live();anchor=performance.now();playing=false;clockValid=false;
-    infPosition=null;infPlaying=null;
-    if(!infLink){status='等待 InfLink-rs';sendClock();return;}
-    const onTimeline=e=>{if(infLink!==api)return;syncSong();recoverLyrics();acceptTimeline(e.detail,api);};
-    const onSong=()=>{if(infLink===api)sample();};
+    sourcePosition=null;sourcePlaying=null;sourceKind=null;
+    if(!player){status='等待 网易云播放器';sendClock();return;}
+    const onTimeline=e=>{if(player!==api)return;syncSong();recoverLyrics();acceptTimeline(e.detail,api);};
+    const onSong=()=>{if(player===api)sample();};
     const onPlaying=e=>{
-      if(infLink!==api)return;
+      if(player!==api)return;
       position=live();anchor=performance.now();playback.event(e.detail);
       if(!sample(undefined,e.detail)){playing=playback.current();sendClock(pendingSeek?'pending':'');}
     };
-    const bindings=[['timelineUpdate',onTimeline],['songChange',onSong],['playStateChange',onPlaying]];
+    const onControlError=e=>{const own=pendingSeek;if(player===api&&own&&e.detail?.requestId===own.id&&e.detail?.songId===own.songId)failSeek(own,e.detail.reason);};
+    const bindings=[['timelineUpdate',onTimeline],['songChange',onSong],['playStateChange',onPlaying],['controlError',onControlError]];
     for(const [name,fn]of bindings)api.addEventListener?.(name,fn);
-    detachInfLink=()=>{for(const [name,fn]of bindings)api.removeEventListener?.(name,fn);};
+    detachPlayer=()=>{for(const [name,fn]of bindings)api.removeEventListener?.(name,fn);};
     status='已连接';
   }
   function tick(){
     if(stopped||socket?.readyState!==1)return;
     try{
-      attachInfLink();sample();sendRnpStyle();
-      if(playing&&clockValid&&!pendingSeek&&!infTimelineFresh()){
-        position=live();anchor=performance.now();clockValid=false;status='等待 InfLink 播放进度';sendClock();
+      attachPlayer();sample();sendRnpStyle();
+      if(playing&&clockValid&&!pendingSeek&&!playerTimelineFresh()){
+        position=live();anchor=performance.now();clockValid=false;status='等待 网易云播放器 播放进度';sendClock();
       }
+      refreshStatus();
     }catch(e){console.debug('[MiniLyrics] 状态同步暂不可用',e);}
     finally{
       send({type:'ping'});
@@ -255,10 +488,12 @@ const MINILYRICS_VERSION="0.6.33";
   function resyncPage(){
     if(stopped)return;
     if(windowSession&&socket?.readyState!==1){queueReconnect(windowSession,0);return;}
-    try{attachInfLink();sample();}catch(e){console.debug('[MiniLyrics] 恢复同步失败',e);}
+    try{attachPlayer();sample();}catch(e){console.debug('[MiniLyrics] 恢复同步失败',e);}
   }
   function refreshStatus(){
-    if(!statusView)return;const text=status+' · 进度：'+(infLink?'InfLink':'等待 InfLink')+' · '+Math.floor(live()/1000)+' 秒 · RNP 歌词 '+lines.length+' 行 · 小窗确认：'+(hostState?.lyricCount??'待回报');if(statusView.textContent!==text)statusView.textContent=text;
+    if(!statusView)return;
+    const state=playerAdapter.getDiagnostics?.()?.streamState,labels={'waiting-player':'播放器未就绪','waiting-subscription':'等待播放器初始化','subscription-lost':'播放同步已中断','waiting-progress':'等待实际播放进度','events-filtered':'收到进度但未接受','progress-stalled':'播放进度已中断','progress-live':'进度正常','progress-paused':'播放已暂停'};
+    const text=status+' · 进度：'+(labels[state]??(player?'网易云播放器':'等待 网易云播放器'))+' · '+Math.floor(live()/1000)+' 秒 · RNP 歌词 '+lines.length+' 行 · 小窗确认：'+(hostState?.lyricCount??'待回报');if(statusView.textContent!==text)statusView.textContent=text;
   }
   function connectSocket(port){
     const ws=new WebSocket(`ws://127.0.0.1:${port}/`);
@@ -278,6 +513,11 @@ const MINILYRICS_VERSION="0.6.33";
     await new Promise(r=>setTimeout(r,200));
     try{retireSocket(await connectSocket(port),token);}catch{}
   }
+  function retireWindow(own,ws=null){
+    if(own.retired){ws?.close();return;}
+    own.retired=true;
+    if(ws)retireSocket(ws,own.token);else return retireHost(own.port,own.token);
+  }
   const ownsWindow=own=>!stopped&&windowSession===own&&own.session===session;
   function rememberWindow(own){
     try{window.sessionStorage?.setItem('MiniLyrics.window',JSON.stringify({port:own.port,token:own.token}));}catch{}
@@ -286,7 +526,7 @@ const MINILYRICS_VERSION="0.6.33";
   function releaseConnection(){
     clearTimeout(timer);timer=null;clearSeek();playback.reset();
     position=live();anchor=performance.now();playing=false;clockValid=false;hostState=null;
-    detachInfLink?.();detachInfLink=null;infLink=null;infPosition=null;infPlaying=null;
+    detachPlayer?.();detachPlayer=null;player=null;sourcePosition=null;sourcePlaying=null;sourceKind=null;
   }
   function windowClosed(own){
     if(!ownsWindow(own))return;
@@ -295,9 +535,9 @@ const MINILYRICS_VERSION="0.6.33";
     status='小窗已关闭';refreshStatus();
   }
   function bindSocket(ws,own){
-    if(!ownsWindow(own)){if(stopped)ws.close();else retireSocket(ws,own.token);return;}
+    if(!ownsWindow(own)){if(stopped)ws.close();else retireWindow(own,ws);return;}
     // Recover the actual snapshot before initializing the same host again.
-    try{attachInfLink();sample();}catch(e){console.debug('[MiniLyrics] 等待播放状态恢复',e);}
+    try{attachPlayer();sample();}catch(e){console.debug('[MiniLyrics] 等待播放状态恢复',e);}
     socket=ws;
     ws.onmessage=e=>{
       if(!ownsWindow(own)||socket!==ws)return;
@@ -315,7 +555,7 @@ const MINILYRICS_VERSION="0.6.33";
     send({type:'hello',token:own.token});
     if(song.id){
       send({type:'track',...song});
-      if(lastAppliedRnp)send({type:'lyrics',songId:song.id,revision:++lyricRevision,lines});
+      if(lastAppliedRnp)send({type:'lyrics',songId:song.id,revision:++lyricRevision,mode:lyricMode,lines});
       if(clockValid)sendClock();
     }
     sendFont();sendRnpStyle(true);sendBackground();
@@ -329,7 +569,7 @@ const MINILYRICS_VERSION="0.6.33";
       own.connecting=true;let connected=false;
       try{
         const ws=await connectSocket(own.port);
-        if(!ownsWindow(own)){if(stopped)ws?.close();else retireSocket(ws,own.token);return;}
+        if(!ownsWindow(own)){if(stopped)ws?.close();else retireWindow(own,ws);return;}
         if(ws){bindSocket(ws,own);connected=socket===ws&&ws.readyState===1;}
       }catch(e){console.debug('[MiniLyrics] 等待小窗重新连接',e);}
       finally{own.connecting=false;if(ownsWindow(own)&&!connected)queueReconnect(own,2000);}
@@ -349,14 +589,14 @@ const MINILYRICS_VERSION="0.6.33";
       const port=42000+Math.floor(Math.random()*6000),own={port,token,session:ownSession,connecting:true,launched:false};
       windowSession=own;
       const ok=await betterncm.app.exec('"'+pluginPath+'\\MiniLyricsHost.exe" --port '+port+' --token '+token,false,false);
-      if(!current()){if(ok!==false&&!stopped)await retireHost(port,token);return;}
+      if(!current()){if(ok!==false&&!stopped)await retireWindow(own);return;}
       if(ok===false)throw new Error('原生窗口启动失败');
       own.launched=true;rememberWindow(own);
       for(let attempt=0;attempt<15;attempt++){
         await new Promise(r=>setTimeout(r,200));
-        if(!current()){if(!stopped)await retireHost(port,token);return;}
+        if(!current()){if(!stopped)await retireWindow(own);return;}
         const ws=await connectSocket(port);
-        if(!current()){if(ws){if(stopped)ws.close();else retireSocket(ws,token);}return;}
+        if(!current()){if(stopped)ws?.close();else await retireWindow(own,ws);return;}
         if(!ws)continue;
         own.connecting=false;bindSocket(ws,own);return;
       }
@@ -375,7 +615,7 @@ const MINILYRICS_VERSION="0.6.33";
     const own=windowSession,connected=socket?.readyState===1;
     session++;windowSession=null;busy=false;clearTimeout(reconnectTimer);reconnectTimer=null;forgetWindow();
     send({type:'exit'});const previous=socket;socket=null;releaseConnection();previous?.close();
-    if(own&&!connected)void retireHost(own.port,own.token);
+    if(own&&!connected&&!own.connecting)retireWindow(own);
     status='小窗已关闭';refreshStatus();
   }
   function dispose(){
@@ -384,15 +624,16 @@ const MINILYRICS_VERSION="0.6.33";
     stopped=true;session++;busy=false;clearTimeout(reconnectTimer);reconnectTimer=null;
     const previous=socket;socket=null;releaseConnection();previous?.close();
     for(const [target,name,fn]of listeners)target.removeEventListener?.(name,fn);
+    playerAdapter.dispose();
   }
-  listen(document,'lyrics-updated',e=>{if(stopped)return;const update=e.detail??window.currentLyrics;cacheRnp(update);attachInfLink();sample(update);});
+  listen(document,'lyrics-updated',e=>{if(stopped)return;const update=e.detail??window.currentLyrics;cacheRnp(update);attachPlayer();sample(update);});
   // RNP persists this setting before dispatching the event. Share the reader
   // and signature with periodic recovery so the same style is sent only once.
   listen(document,'rnp-lyric-stagger',()=>sendRnpStyle());
   listen(document,'rnp-global-offset',e=>{offset=C.finite(e.detail);sendClock();});
   plugin.onLoad(()=>{
     try{offset=C.finite(window.localStorage?.getItem('refined-now-playing-lyric-offset'));}catch{}
-    try{attachInfLink();sample();}catch(e){console.debug('[MiniLyrics] 等待播放信息',e);}
+    try{attachPlayer();sample();}catch(e){console.debug('[MiniLyrics] 等待播放信息',e);}
     try{
       const saved=JSON.parse(window.sessionStorage?.getItem('MiniLyrics.window')??'null');
       if(saved&&Number.isInteger(saved.port)&&saved.port>=42000&&saved.port<48000&&/^[0-9a-f]{48}$/.test(saved.token)){
@@ -432,9 +673,9 @@ const MINILYRICS_VERSION="0.6.33";
     const s=document.createElement('p');statusView=s;refreshStatus();el.append(s);return el;
   });
   window.__miniLyrics={open,dispose,getStatus:()=>status,getDiagnostics:()=>({version:MINILYRICS_VERSION,status,songId:song.id,ncmId:song.ncmId,
-    progressSource:infLink?'InfLink':'未同步',positionMs:live(),playing,valid:clockValid,lyricCount:lines.length,
-    lyricSource:lines.length?'RNP 歌词':'等待 RNP',lyricRevision,rnpSongId:providerId(window.currentLyrics),
-    host:hostState,infLinkVersion:infLink?.version??null,infLinkFresh:infTimelineFresh(),
+    progressSource:player?'网易云播放器':'未同步',positionMs:live(),playing,valid:clockValid,lyricCount:lines.length,
+    lyricMode,lyricSource:lyricMode==='waiting'?'等待 RNP':lyricMode==='empty'?'RNP 暂无歌词':'RNP 歌词',lyricRevision,rnpSongId:providerId(window.currentLyrics),
+    host:hostState,playerVersion:player?.version??null,playerFresh:playerTimelineFresh(),playerDiagnostics:playerAdapter.getDiagnostics?.()??null,
     seekPending:!!pendingSeek,seekRequest:lastSeekId,playbackState:playback.snapshot(),background:{...background}})};
   listen(window,'rnp-lyric-page-opened',resyncPage);
   listen(window,'rnp-lyric-page-closed',resyncPage);

@@ -2,19 +2,22 @@
 (function (root) {
   'use strict';
   const finite = (x, fallback = 0) => Number.isFinite(Number(x)) ? Number(x) : fallback;
-  function normalizeLines(input) {
+  function normalizeLines(input, options = {}) {
     if (!Array.isArray(input)) return [];
-    return input.slice(0, 5000).filter(l => l && typeof l==='object').map(l => {
+    const lines = input.slice(0, 5000).filter(l => l && typeof l==='object').map(l => {
       const time = Math.max(0, finite(l.time ?? l.startTime ?? l.start));
-      const text = String(l.originalLyric ?? l.lyric ?? l.text ?? l.content ?? '');
+      let text = String(l.originalLyric ?? l.lyric ?? l.text ?? l.content ?? '');
       const words = (Array.isArray(l.dynamicLyric) ? l.dynamicLyric : []).slice(0, 500).filter(w => w && typeof w==='object').map(w => {
         const t = finite(w.time);
-        return {text: String(w.word ?? w.text ?? ''), time: t >= time - 1000 ? t : time + t,
+        return {text: String(w.word ?? w.text ?? ''), time: options.wordTiming === 'relative' ? time + t : t,
           duration: Math.max(1, finite(w.duration, 1))};
       });
-      return {time, duration: Math.max(0, finite(l.duration)), text, isInterlude: !!l.isInterlude || text === '',
-        translation: String(l.translatedLyric ?? l.translation ?? ''), words};
-    }).sort((a,b) => a.time-b.time);
+      if (!text) text = words.map(w => w.text).join('');
+      const translation = String(l.translatedLyric ?? l.translation ?? '');
+      return {time, duration: Math.max(0, finite(l.duration)), text, isInterlude: !!l.isInterlude || (!text && !translation),
+        translation, words};
+    });
+    return options.unsynced ? lines : lines.sort((a,b) => a.time-b.time);
   }
   function metadata(info) {
     if(!info || typeof info!=='object') return null;
@@ -64,7 +67,7 @@
       if(inferred&&now-lastMotionAt>=2000){inferred=false;run=null;}
       output=inferred;return output;
     }
-    return {sample,event:value=>report(value,true),reset,resetProgress:()=>{point=null;run=null;},
+    return {sample,event:value=>report(value,true),reset,resetProgress:()=>{point=null;run=null;inferred=false;lastMotionAt=-Infinity;output=reported===true;},
       current:()=>output,snapshot:()=>({reportedPlaying:reported,playing:output,inferredFromProgress:inferred,
         progressSamples:run?.steps??0})};
   }

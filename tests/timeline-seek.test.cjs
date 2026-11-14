@@ -20,7 +20,7 @@ test('normal samples keep pending requests alive until the actual target is reac
  f.emitTimeline(60000);assert.equal(f.diagnostics().seekPending,false);
 }));
 test('synchronous confirmation survives later asynchronous rejection',()=>run(async f=>{
- f.setSeek(target=>{f.emitTimeline(target);return Promise.resolve(false);});f.seek(30000);await Promise.resolve();
+ f.setSeek(target=>{f.emitTimeline(target);return Promise.resolve(false);});f.seek(30000);assert.equal(f.diagnostics().positionMs,30000);assert.equal(f.diagnostics().seekPending,false);await Promise.resolve();
  assert.equal(f.diagnostics().positionMs,30000);assert.equal(clocks(f).some(m=>m.seekState==='failed'),false);
 }));
 test('open, close, reopen and dispose never read or alter native registrations',async()=>{

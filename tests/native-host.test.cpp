@@ -38,6 +38,34 @@ struct NativeTest {
    CancelWaitableTimer(a.frameTimer);a.frameArmed=false;a.frameRunning=false;a.frameDeadline=0;a.schedule();return a.intervalMs;
   }
  };
+ static void viewportRows(){Fixture f;auto&a=f.a;f.lines();a.height=1000;a.viewportBottom=970;a.position=41000;a.update();require(a.groups.count(28)&&a.groupVisible(a.group(28),a.motionNow()),"tall viewport displays more than six following rows");require(a.groups.count(12)&&a.groupVisible(a.group(12),a.motionNow()),"tall viewport displays more than six preceding rows");require(a.groups.size()<=32,"viewport cache stays bounded");std::cout<<"PASS: viewport-driven rows\n";}
+ static void browseBoundary(){
+  Fixture f;auto&a=f.a;f.lines();a.playing=true;a.snapRow=false;a.position=21980;a.update();
+  f.wheel(-360);int preview=a.browseIndex;require(preview>10,"wheel previews future lyrics");
+  a.testWallMs+=100;a.position=22020;a.update();require(a.index==11&&a.browseIndex==preview,"ordinary next line preserves browse");
+  // Real progress may correct local extrapolation backwards across a line boundary.
+  Json clock=Json::obj();clock["type"]="clock";clock["position"]=21980;clock["playing"]=true;clock["valid"]=true;
+  a.receive(clock);require(a.browseIndex==preview&&a.focusIndex==preview,"small boundary correction must not cancel manual preview");
+  clock["position"]=22050;a.receive(clock);require(a.browseIndex==preview,"corrected next line preserves preview");
+  a.testWallMs+=3901;a.update();require(a.browseIndex<0,"four second return still works");
+  f.wheel(-360);require(a.browseIndex>=0,"browse again");a.seekTo(40000);a.update();require(a.browseIndex<0,"explicit seek still exits browse");
+  a.testWallMs+=1000;a.update();f.wheel(-360);
+  clock["position"]=60000;a.receive(clock);require(a.browseIndex<0,"large external seek still exits browse");
+  a.testWallMs+=1000;a.update();f.wheel(-360);a.playing=false;a.update();
+  require(a.browseIndex>=0,"pause preserves manual browse");a.testWallMs+=4001;a.update();require(a.browseIndex<0,"paused timeout still returns");
+  f.wheel(-360);Json track=Json::obj();track["type"]="track";track["id"]="next-song";a.receive(track);require(a.browseIndex<0,"new track exits browse");
+  std::cout<<"PASS: browse boundary, timeout and explicit seek\n";
+ }
+ static void lyricStates(){
+  struct Sockets {Sockets(){WSADATA data{};require(WSAStartup(MAKEWORD(2,2),&data)==0,"initialize lyric-state bridge");}~Sockets(){WSACleanup();}} sockets;
+  int failures=0;auto run=[&](const char*name,auto scenario){try{scenario();std::cout<<"PASS: "<<name<<"\n";}catch(const std::exception&e){failures++;std::cout<<"FAIL: "<<name<<": "<<e.what()<<"\n";}};
+  run("startup rows are visible and clickable",[]{Fixture f;auto&a=f.a;f.lines(1);for(auto&l:a.lines)l.time+=5000;a.valid=false;a.playing=false;a.position=0;a.index=-1;a.updatePlaceholders();a.update();auto&g=a.group(0);require(a.groupVisible(g,a.motionNow()),"preview must use normal row visibility");a.bridge=std::make_unique<Bridge>(0,std::string(32,'t'),[](Json){});a.message(WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(int(a.textX+8),int(g.y.value(a.motionNow())+g.mainHeight/2)));require(a.seekPending&&a.position==0,"preview click only requests a seek");});
+  run("stale progress retains a visible current row",[]{Fixture f;auto&a=f.a;f.lines();Json c=Json::obj();c["type"]="clock";c["position"]=21000;c["playing"]=true;c["valid"]=true;a.receive(c);c["valid"]=false;c["playing"]=false;a.receive(c);require(a.index==10&&a.focusIndex==10&&a.groupVisible(a.group(10),a.motionNow()),"lost clock must not return to first lyric");require(!a.frameRunning,"stale clock stops frames");});
+  run("untimed content stays browsable without time seeking",[]{Fixture f;auto&a=f.a;Json m=Json::obj();m["type"]="lyrics";m["songId"]="";m["mode"]="untimed";m["lines"].kind=Json::Array;for(int i=0;i<8;i++){Json l=Json::obj();l["time"]=0;l["text"]="text "+std::to_string(i);m["lines"].array.push_back(l);}a.receive(m);Json c=Json::obj();c["type"]="clock";c["position"]=21000;c["playing"]=true;c["valid"]=true;a.receive(c);require(a.focusIndex==0,"untimed rows must not follow timestamps");f.wheel(-360);int focus=a.focusIndex;a.testWallMs+=5000;a.update();require(a.focusIndex==focus,"untimed reading position does not auto-return");a.bridge=std::make_unique<Bridge>(0,std::string(32,'t'),[](Json){});auto&g=a.group(focus);a.message(WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(int(a.textX+8),int(g.y.value(a.motionNow())+g.mainHeight/2)));require(!a.seekPending,"untimed lyric click cannot seek");});
+  run("empty result is distinct from pending lyrics",[]{Fixture f;auto&a=f.a;require(a.state("test")["lyricStatus"].s()=="waiting","waiting before a result");Json m=Json::obj();m["type"]="lyrics";m["songId"]="";m["mode"]="empty";a.receive(m);require(a.state("test")["lyricStatus"].s()=="empty","empty result state");});
+  run("mode changes reset reading focus and preserve native input order",[]{Fixture f;auto&a=f.a;f.lines();a.playing=true;a.update();Json m=Json::obj();m["type"]="lyrics";m["songId"]="";m["mode"]="untimed";m["lines"].kind=Json::Array;for(int i=0;i<3;i++){Json l=Json::obj();l["time"]=9000-i*1000;l["text"]="row "+std::to_string(i);m["lines"].array.push_back(l);}a.receive(m);require(a.focusIndex==0&&a.lines[0].text==L"row 0","timed to untimed starts at the input's first row");require(!a.frameRunning,"untimed lyrics do not schedule playback frames");f.wheel(-120);int focus=a.focusIndex;a.seekTo(40000);a.update();require(a.focusIndex==focus&&a.flight.rows.empty(),"transport seek preserves untimed reading");m["mode"]="timed";a.receive(m);require(a.lines[0].time==7000&&a.index==2,"timed mode resumes sorted clock selection");});
+  require(failures==0,"lyric state scenarios failed");
+ }
  static void typography(){
   for(int mode:{0,1,2}){
    Fixture f;auto&a=f.a;f.lines(mode);
@@ -115,6 +143,17 @@ struct NativeTest {
    std::ofstream out(file,std::ios::binary);out.write(reinterpret_cast<char*>(&head),sizeof(head));out.write(reinterpret_cast<char*>(&info),sizeof(info));out.write(reinterpret_cast<char*>(pixels),width*height*4);require(bool(out),"write pixel artifact");
   }
  };
+ static void startupPreview(){
+  Fixture f;auto&a=f.a;f.lines(1);for(auto&line:a.lines)line.time+=5000;a.lines[0].text=L"Ready before playback";a.position=0;a.index=-1;a.valid=false;a.playing=false;a.updatePlaceholders();a.update();Surface surface;
+  const auto frame=[&](bool expected){surface.target->BeginDraw();surface.target->Clear(D2D1::ColorF(D2D1::ColorF::Black));
+   if(expected){const auto&p=a.group(a.preludePreview);a.text(surface.g,p.main,a.textX,a.lyricAnchor(),D2D1::ColorF(D2D1::ColorF::White));a.text(surface.g,p.subtitle,a.textX,a.lyricAnchor()+p.mainHeight+TranslationGap,D2D1::ColorF(D2D1::ColorF::White),.8f);}
+   else a.drawLyrics(surface.g,0);
+   check(surface.target->EndDraw());GdiFlush();return std::vector<BYTE>(surface.pixels,surface.pixels+Surface::width*Surface::height*4);};
+  auto actual=frame(false),expected=frame(true);int top=int(a.lyricAnchor()),bottom=int(a.lyricAnchor()+a.group(0).renderedHeight(1));require(std::equal(actual.begin()+top*Surface::width*4,actual.begin()+bottom*Surface::width*4,expected.begin()+top*Surface::width*4),"paused startup displays first lyric and translation before a clock sample");
+  require(!a.valid&&!a.frameRunning&&a.position==0,"preview must not fabricate progress or schedule animation");
+  Json clock=Json::obj();clock["type"]="clock";clock["position"]=15000;clock["playing"]=true;clock["valid"]=true;a.receive(clock);require(a.valid&&a.index==5,"first actual clock resumes normal lyric selection");
+  std::cout<<"PASS: startup lyric preview without fabricated playback\n";
+ }
  static void pixels(const std::filesystem::path&directory){
   Fixture f;auto&a=f.a;f.lines(1);f.layout(10,10);a.textX=20;auto&row=a.group(10);row.subtitle=a.layout(L"Translation scales with the lyric",a.secondaryFormat.get());Surface surface;
   std::vector<BYTE> baseline;int baselineWidth=0,baselineHeight=0;
@@ -164,7 +203,7 @@ struct NativeTest {
   a.motion.setRunning(true,a.testWallMs);a.playing=true;a.updateIndicators();a.testWallMs+=500;require(indicatorCrop(render())!=indicatorCrop(paused),"resumed indicator continues breathing");
   f.layout(0,0);require(!a.showInterlude(a.group(0))&&!a.groupVisible(a.group(0),a.motionNow()),"browsed empty row has no indicator or hit target");f.interval(1000);expectNear(a.framePeriod,200,"browsed empty row does not force animation frames");
   a.valid=false;require(a.lyricView()==App::LyricView::Rows,"manual browse remains available while clock is unconfirmed");
-  f.layout(0);require(a.lyricView()==App::LyricView::Syncing,"unconfirmed progress uses syncing state");require(!a.groupVisible(a.group(1),a.motionNow())&&!a.showInterlude(a.group(0)),"unconfirmed progress draws no timed indicator or rows");
+  f.layout(0);require(a.lyricView()==App::LyricView::Rows,"stale progress retains rows after an earlier valid clock");require(a.groupVisible(a.group(1),a.motionNow())&&!a.showInterlude(a.group(0)),"unconfirmed progress shows text without a timed indicator");
   a.valid=true;a.index=0;f.layout(0);a.testWallMs+=1000;a.index=1;f.layout(1);require(a.indicatorVisible(a.group(0)),"ending interlude fades out for 500ms like RNP");a.testWallMs+=500;require(!a.groupVisible(a.group(0),a.motionNow()),"past empty row disappears when its fade completes");f.interval(6500);expectNear(a.framePeriod,200,"past empty row does not drive high frequency redraw after fade");
   a.index=0;f.layout(0);a.group(0).y.snap(a.viewportBottom+1);f.interval(1000);expectNear(a.framePeriod,200,"offscreen active gap does not drive high frequency redraw");
   a.lines[0].words.push_back({L"Word-only lyric",0,5000});require(!a.emptyGroup(a.group(0))&&a.isInterlude(a.group(0)),"explicit RNP interlude marker survives word data");
@@ -231,8 +270,12 @@ struct NativeTest {
    x.testWallMs+=1000;x.update();require(x.flight.rows.empty()&&x.index==5,"external backward seek completes");
    x.playing=false;x.update();seek["position"]=41000;x.receive(seek);require(x.frameRunning,"paused external seek schedules flight");
    x.testWallMs+=1000;x.update();require(x.flight.rows.empty()&&!x.playing&&!x.frameRunning,"paused external seek finishes without resuming");
-   Json correction=Json::obj();correction["type"]="clock";correction["position"]=61000;correction["playing"]=false;correction["valid"]=true;x.receive(correction);
-   require(x.flight.rows.empty()&&x.index==30,"clock-only correction does not masquerade as a seek");
+   Json correction=Json::obj();correction["type"]="clock";correction["position"]=41100;correction["playing"]=false;correction["valid"]=true;x.receive(correction);
+   require(x.flight.rows.empty()&&x.index==20,"small clock correction does not start a seek flight");
+   // Since 0.6.31, actual timeline jumps are authoritative without a separate seek message.
+   correction["position"]=61000;x.receive(correction);
+   require(!x.flight.rows.empty()&&x.index==30&&!x.playing,"large actual clock jump animates while remaining paused");
+   x.testWallMs+=1000;x.update();require(x.flight.rows.empty()&&!x.frameRunning,"paused timeline flight completes and stops scheduling");
   }
   Fixture f;auto&a=f.a;f.lines(2);a.height=160;a.viewportBottom=132;a.textX=20;a.playing=true;f.layout(10);Surface surface;surface.target->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
   auto render=[&](){surface.target->BeginDraw();surface.target->Clear(D2D1::ColorF(D2D1::ColorF::Black));surface.target->PushAxisAlignedClip(D2D1::RectF(a.textX,a.viewportTop,a.width-12,a.viewportBottom),D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);a.drawLyrics(surface.g,a.current()+a.offset);surface.target->PopAxisAlignedClip();check(surface.target->EndDraw());GdiFlush();return std::vector<BYTE>(surface.pixels,surface.pixels+Surface::width*Surface::height*4);};
@@ -446,25 +489,26 @@ struct NativeTest {
    v.position=26000;v.index=v.rowAt(v.position);v.playing=false;v.updatePlaceholders();p.layout(v.index);v.seekTo(0);v.update();
    v.testWallMs+=900;v.applyFlight(v.animationWall());v.updateIndicators();Surface actual,expected;
    actual.target->BeginDraw();actual.target->Clear(D2D1::ColorF(D2D1::ColorF::Black));v.drawLyrics(actual.g,v.current());check(actual.target->EndDraw());
-   expected.target->BeginDraw();expected.target->Clear(D2D1::ColorF(D2D1::ColorF::Black));v.drawInterlude(expected.g,v.preludeDots,v.textX,v.lyricAnchor(),v.current(),0,v.lines.front().time);v.drawGroup(expected.g,v.group(0),0,v.current());check(expected.target->EndDraw());GdiFlush();
+   expected.target->BeginDraw();expected.target->Clear(D2D1::ColorF(D2D1::ColorF::Black));v.drawInterlude(expected.g,v.preludeDots,v.textX,v.lyricAnchor(),v.current(),0,v.lines.front().time);for(const auto& item:v.groups)if(v.groupVisible(item.second,v.motionNow()))v.drawGroup(expected.g,item.second,item.first,v.current());check(expected.target->EndDraw());GdiFlush();
    bool same=std::equal(actual.pixels,actual.pixels+Surface::width*Surface::height*4,expected.pixels);visiblePixels=visiblePixels&&same;metrics[words?"wordPreludeOnlyPreview":"plainPreludeOnlyPreview"]=same;
    if(!directory.empty())actual.save(directory/(words?"word-prelude-landing.bmp":"plain-prelude-landing.bmp"));
   }
   metrics["pass"]=cached&&shown&&changed&&visiblePixels&&unchanged;metrics["scenarios"]=3;
   if(!directory.empty()){std::ofstream report(directory/"cleanup-results.json");report<<metrics.dump();}
-  require(cached,"clock correction retains cached glyphs and builds only newly visible rows");require(shown,"showing unchanged lyrics reuses cached layouts");require(changed,"one changed translation rebuilds only its own group");require(unchanged,"unchanged settings do not repaint or overwrite settings");require(visiblePixels,"plain and word lyrics both hide non-preview rows when landing in prelude");
+  require(cached,"clock correction retains cached glyphs and builds only newly visible rows");require(shown,"showing unchanged lyrics reuses cached layouts");require(changed,"one changed translation rebuilds only its own group");require(unchanged,"unchanged settings do not repaint or overwrite settings");require(visiblePixels,"plain and word lyrics retain visible rows when landing in prelude");
   std::cout<<"PASS: cached correction/show, changed-line refresh and shared plain/word visibility\n";
  }
  static void preludeRows(const std::filesystem::path&directory){
   struct Sockets {Sockets(){WSADATA data{};require(WSAStartup(MAKEWORD(2,2),&data)==0,"initialize isolated seek bridge");}~Sockets(){WSACleanup();}} sockets;
-  Fixture f;auto&a=f.a;a.makeFormat(a.metaFormat,11.5f,DWRITE_FONT_WEIGHT_NORMAL);a.height=160;a.viewportBottom=132;a.textX=20;
+  Fixture f;auto&a=f.a;a.makeFormat(a.metaFormat,11.5f,DWRITE_FONT_WEIGHT_NORMAL);a.height=300;a.viewportBottom=272;a.textX=20;
   auto track=[&](const char*id){Json m=Json::obj();m["type"]="track";m["id"]=id;m["title"]=id;m["duration"]=30000;a.receive(m);};
   auto lyrics=[&](const char*id,double first,bool gap=false,bool words=false){Json m=Json::obj();m["type"]="lyrics";m["songId"]=id;m["lines"].kind=Json::Array;if(gap){Json l=Json::obj();l["time"]=0;l["duration"]=first;l["text"]="";l["isInterlude"]=true;m["lines"].array.push_back(l);}for(int i=0;i<3;i++){Json l=Json::obj();l["time"]=first+i*5000;l["duration"]=5000;l["text"]=std::string(id)+" lyric "+std::to_string(i);l["translation"]="Translation";if(words){Json word=Json::obj();word["text"]=l["text"];word["time"]=l["time"];word["duration"]=5000;l["words"].kind=Json::Array;l["words"].array.push_back(word);}m["lines"].array.push_back(l);}a.receive(m);};
   auto clock=[&](double time,bool playing=true){Json m=Json::obj();m["type"]="clock";m["position"]=time;m["valid"]=true;m["playing"]=playing;a.receive(m);};
   Surface surface,reference;
   auto render=[&](){surface.target->BeginDraw();surface.target->Clear(D2D1::ColorF(D2D1::ColorF::Black));a.drawLyrics(surface.g,a.current()+a.offset);check(surface.target->EndDraw());GdiFlush();return std::vector<BYTE>(surface.pixels,surface.pixels+Surface::width*Surface::height*4);};
-  auto click=[&](int id,double target){auto&g=a.group(id);int x=int(std::round((a.textX+8)*a.scale())),y=int(std::round((g.y.value(a.motionNow())+g.mainHeight*g.zoom.value(a.motionNow())*.5f)*a.scale()));a.hover=false;a.message(WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(x,y));require(a.seekPending&&a.position==target,"visible lyric click enters the normal seek request path");require(!a.flight.rows.empty(),"prelude click retains the normal seek flight");};
+  auto click=[&](int id,double target){auto&g=a.group(id);double beforePosition=a.position;int x=int(std::round((a.textX+8)*a.scale())),y=int(std::round((g.y.value(a.motionNow())+g.mainHeight*g.zoom.value(a.motionNow())*.5f)*a.scale()));a.hover=false;a.message(WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(x,y));require(a.seekPending&&a.position==beforePosition,"visible lyric click requests without fabricating progress");Json confirmed=Json::obj();confirmed["type"]="clock";confirmed["songId"]=a.songId;confirmed["position"]=target;confirmed["valid"]=true;confirmed["playing"]=a.playing;confirmed["seekState"]="confirmed";confirmed["seekRequest"]=double(a.seekRequest);a.receive(confirmed);require(!a.seekPending&&!a.flight.rows.empty(),"confirmed prelude seek retains the normal flight");};
   track("early-lyrics");lyrics("early-lyrics",6000);clock(1000);a.testWallMs+=1000;a.update();
+  require(a.groupVisible(a.group(1),a.motionNow())&&a.groupVisible(a.group(2),a.motionNow()),"implicit prelude must display later lyrics within viewport");
   auto before=render();if(!directory.empty())surface.save(directory/"prelude-preview.bmp");
   auto&g=a.group(0);bool visible=a.groupVisible(g,a.motionNow());Json metrics=Json::obj();metrics["visibleNormalPreview"]=visible;metrics["pass"]=false;if(!directory.empty()){std::ofstream report(directory/"prelude-results.json");report<<metrics.dump();}
   require(a.lyricView()==App::LyricView::Prelude&&visible,"prelude preview must be a visible normal lyric and click target");
@@ -473,17 +517,17 @@ struct NativeTest {
   reference.target->BeginDraw();reference.target->Clear(D2D1::ColorF(D2D1::ColorF::Black));a.drawGroup(reference.g,g,0,a.current());check(reference.target->EndDraw());GdiFlush();
   int top=int(std::floor(g.y.value(a.motionNow()))),bottom=std::min(Surface::height,int(std::ceil(g.y.value(a.motionNow())+g.renderedHeight(g.zoom.value(a.motionNow())))));
   require(std::equal(before.begin()+top*Surface::width*4,before.begin()+bottom*Surface::width*4,reference.pixels+top*Surface::width*4),"prelude preview pixels match the normal semibold lyric and translation");
-  a.bridge=std::make_unique<Bridge>(0,std::string(32,'p'),[](Json){});click(0,6000);auto firstFrame=render();require(std::equal(before.begin()+top*Surface::width*4,before.begin()+bottom*Surface::width*4,firstFrame.begin()+top*Surface::width*4),"prelude seek starts from the displayed original and translation pixels");a.testWallMs+=900;a.update();require(a.flight.rows.empty()&&a.index==0,"prelude click lands on the first lyric");
+  a.bridge=std::make_unique<Bridge>(0,std::string(32,'p'),[](Json){});click(0,6000);require(a.flight.rows[1].from.opacity==1&&a.flight.rows[1].to.opacity==1,"seek flight preserves later rows");auto firstFrame=render();require(std::equal(before.begin()+top*Surface::width*4,before.begin()+bottom*Surface::width*4,firstFrame.begin()+top*Surface::width*4),"prelude seek starts from the displayed original and translation pixels");a.testWallMs+=900;a.update();require(a.flight.rows.empty()&&a.index==0,"prelude click lands on the first lyric");
   a.cancelSeek();a.seekTo(0);a.update();a.testWallMs+=900;a.update();a.position=5800;a.update();a.testWallMs+=200;a.position=6000;a.update();
   require(a.index==0&&a.transitionActive,"natural first-line onset animates from the preview");a.testWallMs+=500;a.update();expectNear(a.group(0).zoom.value(a.motionNow()),1,"first line grows to the normal focus size");expectNear(a.group(0).y.value(a.motionNow()),a.lyricAnchor(),"first line returns to the normal focus anchor");
   // Clock-first arrival after a different song must replace the prior preview.
   track("late-lyrics");clock(1000);require(a.lyricView()==App::LyricView::Waiting,"clock-first track waits for its lyrics");lyrics("late-lyrics",10000,false,true);a.testWallMs+=1000;a.update();
   require(a.groupVisible(a.group(0),a.motionNow())&&a.group(0).model.text==L"late-lyrics lyric 0","late lyrics replace the old preview and become clickable");click(0,10000);a.testWallMs+=900;a.update();
-  a.cancelSeek();a.seekTo(0);a.playing=false;a.update();a.testWallMs+=900;a.update();require(a.lyricView()==App::LyricView::Prelude&&a.flight.rows.empty(),"paused seek back lands in prelude");
+  a.cancelSeek();a.seekTo(0);a.playing=false;a.update();a.testWallMs+=900;a.update();require(a.lyricView()==App::LyricView::Prelude&&a.flight.rows.empty(),"paused seek back lands in prelude");require(a.groupVisible(a.group(1),a.motionNow())&&a.group(1).opacity==1,"paused return retains later word lyrics");
   require(a.groupVisible(a.group(0),a.motionNow()),"returned prelude retains the same visible lyric target");click(0,10000);a.testWallMs+=900;a.update();require(a.flight.rows.empty()&&!a.frameRunning,"paused prelude click finishes its animation and sleeps");
   // RNP's explicit opening gap keeps the same ordinary-row input behavior.
   track("explicit-gap");lyrics("explicit-gap",6000,true);clock(1000);a.testWallMs+=1000;a.update();
-  require(a.lyricView()==App::LyricView::Rows&&a.groupVisible(a.group(1),a.motionNow()),"explicit opening gap keeps the normal preview");click(1,6000);
+  require(a.lyricView()==App::LyricView::Rows&&a.groupVisible(a.group(1),a.motionNow()),"explicit opening gap keeps the normal preview");require(a.groupVisible(a.group(2),a.motionNow())&&a.groupVisible(a.group(3),a.motionNow()),"explicit prelude also displays later lyrics");click(1,6000);
   metrics["pass"]=true;metrics["scenarios"]=3;metrics["normalFontPixels"]=true;metrics["clickRequests"]=4;metrics["lateArrival"]=true;metrics["pausedReturn"]=true;
   if(!directory.empty()){std::ofstream report(directory/"prelude-results.json");report<<metrics.dump();}
   std::cout<<"PASS: prelude font/pixels and clicks, late lyrics and paused return, explicit opening gap\n";
@@ -529,7 +573,7 @@ struct NativeTest {
   if(!directory.empty()){std::ofstream report(directory/"moving-results.json");report<<metrics.dump();}
   std::cout<<"PASS: moving frames="<<frames<<", background="<<backgroundFrames<<" in "<<elapsed<<" ms; resume, pause and cleanup passed\n";
  }
- static void run(const std::filesystem::path&directory){typography();motionGeometry();scheduling();pixels(directory);interludes(directory);browseInterludes(directory);seekFlights(directory);backgrounds(directory);std::cout<<"PASS: "<<checks<<" native checks (DirectWrite, lyric/background pixels, animation geometry, settings and scheduling)\n";}
+ static void run(const std::filesystem::path&directory){lyricStates();browseBoundary();startupPreview();typography();motionGeometry();scheduling();pixels(directory);interludes(directory);browseInterludes(directory);seekFlights(directory);backgrounds(directory);std::cout<<"PASS: "<<checks<<" native checks (DirectWrite, lyric/background pixels, animation geometry, settings and scheduling)\n";}
 };
 int NativeTest::checks=0;
-int main(int argc,char**argv){try{auto directory=argc>1?std::filesystem::path(argv[1]):std::filesystem::path();if(argc>2&&std::strcmp(argv[2],"font")==0)NativeTest::fontSizes(directory);else if(argc>2&&std::strcmp(argv[2],"flight")==0)NativeTest::seekFlights(directory);else if(argc>2&&std::strcmp(argv[2],"cleanup")==0)NativeTest::cleanup(directory);else if(argc>2&&std::strcmp(argv[2],"prelude")==0){NativeTest::preludeRows(directory);NativeTest::interludes(directory);}else if(argc>2&&std::strcmp(argv[2],"moving")==0)NativeTest::movingFrames(directory);else if(argc>2&&std::strcmp(argv[2],"words")==0)NativeTest::wordScrolling(directory);else if(argc>2&&std::strcmp(argv[2],"resize")==0)NativeTest::resizeRendering(directory);else if(argc>2&&std::strcmp(argv[2],"background")==0){NativeTest::backgrounds(directory);std::cout<<"PASS: "<<NativeTest::checks<<" focused background checks\n";}else if(argc>2&&std::strcmp(argv[2],"optimization")==0){NativeTest::optimizations(directory);NativeTest::seekFlights(directory);std::cout<<"PASS: "<<NativeTest::checks<<" focused optimization checks\n";}else NativeTest::run(directory);return 0;}catch(const std::exception&e){std::cerr<<"FAIL: "<<e.what()<<"\n";return 1;}}
+int main(int argc,char**argv){try{auto directory=argc>1?std::filesystem::path(argv[1]):std::filesystem::path();if(argc>2&&std::strcmp(argv[2],"viewport")==0)NativeTest::viewportRows();else if(argc>2&&std::strcmp(argv[2],"lyric-state")==0)NativeTest::lyricStates();else if(argc>2&&std::strcmp(argv[2],"startup")==0)NativeTest::startupPreview();else if(argc>2&&std::strcmp(argv[2],"browse")==0)NativeTest::browseBoundary();else if(argc>2&&std::strcmp(argv[2],"font")==0)NativeTest::fontSizes(directory);else if(argc>2&&std::strcmp(argv[2],"flight")==0)NativeTest::seekFlights(directory);else if(argc>2&&std::strcmp(argv[2],"cleanup")==0)NativeTest::cleanup(directory);else if(argc>2&&std::strcmp(argv[2],"prelude")==0){NativeTest::startupPreview();NativeTest::preludeRows(directory);NativeTest::interludes(directory);}else if(argc>2&&std::strcmp(argv[2],"moving")==0)NativeTest::movingFrames(directory);else if(argc>2&&std::strcmp(argv[2],"words")==0)NativeTest::wordScrolling(directory);else if(argc>2&&std::strcmp(argv[2],"resize")==0)NativeTest::resizeRendering(directory);else if(argc>2&&std::strcmp(argv[2],"background")==0){NativeTest::backgrounds(directory);std::cout<<"PASS: "<<NativeTest::checks<<" focused background checks\n";}else if(argc>2&&std::strcmp(argv[2],"optimization")==0){NativeTest::optimizations(directory);NativeTest::seekFlights(directory);std::cout<<"PASS: "<<NativeTest::checks<<" focused optimization checks\n";}else NativeTest::run(directory);return 0;}catch(const std::exception&e){std::cerr<<"FAIL: "<<e.what()<<"\n";return 1;}}
