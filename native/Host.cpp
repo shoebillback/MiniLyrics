@@ -125,7 +125,7 @@ class App {
  Com<ID2D1HwndRenderTarget> target;Graphics graphics;Com<ID2D1RoundedRectangleGeometry> coverClip;
  Com<IDWriteTextFormat> mainFormat,secondaryFormat,metaFormat;
  Layout metaLayout,placeholder;int preludePreview=-1;std::map<int,LyricGroup>groups;InterludeAnimation preludeDots;LyricFlight flight;float secondaryRowHeight=0;
- LyricClock motion;bool transitionActive=false,snapRow=false,testWall=false,freezePlayback=false,layoutDirty=true,stagger=true;double testWallMs=0;int focusIndex=-999,lineCurve=0,browseIndex=-1,wheelRemainder=0;double browseUntil=0;bool returnFromBrowse=false;float viewportTop=32,viewportBottom=98,layoutAnchor=44,mainRowHeight=28;uint64_t groupSerial=0,layoutChanges=0;
+ LyricClock motion;bool transitionActive=false,snapRow=false,testWall=false,freezePlayback=false,layoutDirty=true,stagger=true;double testWallMs=0;int focusIndex=-999,lineCurve=0,browseIndex=-1,wheelRemainder=0;double browseUntil=0;bool returnFromBrowse=false,manualTransition=false,manualLayoutPending=false;float viewportTop=32,viewportBottom=98,layoutAnchor=44,mainRowHeight=28;uint64_t groupSerial=0,layoutChanges=0;
  Com<ID2D1PathGeometry> playGeometry;
  std::vector<Line> lines;CoverData cover;BackgroundSettings background;BackgroundClock backgroundClock;FluidBackground fluid;
  D2D1_COLOR_F bgA=D2D1::ColorF(33/255.f,42/255.f,66/255.f),bgB=D2D1::ColorF(76/255.f,67/255.f,99/255.f);
@@ -142,7 +142,7 @@ class App {
  double current()const{return position+(playing&&valid&&!freezePlayback?std::max(0.,nowMs()-anchor):0.);}
  double animationWall()const{return testWall?testWallMs:nowMs();}
  double motionNow()const{return motion.now(animationWall());}
- void stopBrowsing(){browseIndex=-1;wheelRemainder=0;browseUntil=0;returnFromBrowse=true;KillTimer(hwnd,4);layoutDirty=true;}
+ void stopBrowsing(bool animateReturn=false){browseIndex=-1;wheelRemainder=0;browseUntil=0;returnFromBrowse=true;manualTransition=manualLayoutPending=animateReturn;KillTimer(hwnd,4);layoutDirty=true;}
  void finishTransition(){for(auto&item:groups){auto&g=item.second;g.y.snap(g.y.to);g.zoom.snap(g.zoom.to);g.mainAlpha.snap(g.mainAlpha.to);g.subAlpha.snap(g.subAlpha.to);}transitionActive=false;}
  float scale()const{return dpi/96.f;}
  float lyricAnchor()const{return height/2+4-(mainRowHeight*(1+contextFontSize/currentFontSize)+11)/2;}
@@ -414,7 +414,7 @@ class App {
  }
  void schedule(){
   if(!renderVisible){stopFrames();return;}
-  double time=current()+offset,next=200;bool active=playing&&valid&&(transitionActive||lyricView()==LyricView::Prelude);
+  double time=current()+offset,next=200;bool active=manualTransition||(playing&&valid&&(transitionActive||lyricView()==LyricView::Prelude));
   if(playing&&valid&&!untimed&&index+1<int(lines.size())){next=std::min(next,std::max(1.,lines[index+1].time-time));if(browseIndex<0&&stagger&&focusIndex<=index)next=std::min(next,std::max(1.,lines[index+1].time-time-200));}
   if(playing&&valid&&!untimed)for(const auto&item:groups){const auto&g=item.second;if(!groupVisible(g,motionNow())||staticInterlude(g))continue;const auto&line=g.model;
    if(indicatorVisible(g))active=true;
@@ -422,7 +422,7 @@ class App {
    if(canScroll(item.first)&&((g.glyphs.empty()&&rowWidth(g)*g.zoom.value(motionNow())>width-textX-12)||(g.translated&&g.subtitle.width*g.zoom.value(motionNow())>width-textX-12))){double begin=line.time+900,end=begin+std::max(1200.,(line.duration>0?line.duration:4000)-1600);if(time<begin)next=std::min(next,begin-time);else if(time<end)active=true;}
   }
   bool flying=!flight.rows.empty(),coverAnimating=coverSince>=0&&nowMs()-coverSince<250;active=active||coverAnimating||flying;
-  bool backgroundActive=backgroundAnimating();bool run=flying||(playing&&valid&&((!untimed&&!lines.empty())||hover||coverAnimating||backgroundActive));double wanted=active?1000./(fps==60?60:30):std::max(1.,next);if(backgroundActive)wanted=std::min(wanted,1000./background.fps);
+  bool backgroundActive=backgroundAnimating();bool run=flying||manualTransition||(playing&&valid&&((!untimed&&!lines.empty())||hover||coverAnimating||backgroundActive));double wanted=active?1000./(fps==60?60:30):std::max(1.,next);if(backgroundActive)wanted=std::min(wanted,1000./background.fps);
   if(!run){stopFrames();return;}
   if(frameTimer&&(!systemMoving||modalFrames.active())){
    bool same=frameRunning&&std::abs(framePeriod-wanted)<.001;if(same&&frameArmed)return;
@@ -435,10 +435,18 @@ class App {
  }
  void update(){
   if(valid)hasClock=true;
-  motion.setRunning(renderVisible&&playing&&valid&&!untimed,animationWall());backgroundClock.update(backgroundAnimating(),background.speed,animationWall());
+  if(!renderVisible||!valid||untimed)manualTransition=manualLayoutPending=false;
+  // Browse animation can run while paused; the playback and background clocks stay separate.
+  if(browseIndex>=0&&(lines.empty()||(!untimed&&animationWall()>=browseUntil))){
+   bool animateReturn=renderVisible&&valid&&!untimed&&!lines.empty();
+   if(animateReturn){int actual=rowAt(current()+offset),desired=std::max(0,actual<0?preludePreview:rowAt(current()+offset+(playing&&stagger?200:0)));
+    if(layoutDistance(desired,focusIndex,4)>3){beginFlight(desired,actual);flight.stagger=false;animateReturn=false;}
+   }
+   stopBrowsing(animateReturn);
+  }
+  motion.setRunning(renderVisible&&valid&&!untimed&&(playing||manualTransition),animationWall());backgroundClock.update(backgroundAnimating(),background.speed,animationWall());
   if(!renderVisible){stopFrames();return;}
   if(!valid&&!flight.rows.empty()){flight=LyricFlight();layoutDirty=true;}
-  if(browseIndex>=0&&(lines.empty()||(!untimed&&animationWall()>=browseUntil)))stopBrowsing();
   if(browseIndex>=0){int normalized=browseFocus(browseIndex);if(normalized<0)stopBrowsing();else if(normalized!=browseIndex){browseIndex=normalized;layoutDirty=true;}}
   double time=current()+offset;int next=staticPreview()?-1:rowAt(time);bool actualChanged=next!=index;if(next<index&&flight.rows.empty())snapRow=true;index=next;
   if(!flight.rows.empty()){
@@ -457,7 +465,7 @@ class App {
   else if(snapRow||focusIndex<0||groups.empty()||(!playing&&actualChanged))desired=std::max(0,index);
   else if(returnFromBrowse)desired=std::max(0,playing&&valid?rowAt(time+(stagger?200:0)):index);
   else if(playing&&valid)desired=std::max(0,rowAt(time+(stagger?200:0)));
-  bool animate=playing&&valid&&!untimed&&!snapRow&&focusIndex>=0&&layoutDistance(desired,focusIndex,4)<=3;
+  bool animate=(playing||manualLayoutPending)&&valid&&!untimed&&!snapRow&&focusIndex>=0&&layoutDistance(desired,focusIndex,4)<=3;
   if(snapRow)layoutDirty=true;
   // Prelude and the first active row can share an index but use different anchors.
   bool reflowed=layoutDirty||desired!=focusIndex||groups.empty()||layoutAnchor!=rowAnchor();if(reflowed)reflow(desired,animate);
@@ -466,6 +474,9 @@ class App {
   snapRow=false;returnFromBrowse=false;transitionActive=false;double now=motionNow();
   updateIndicators();
   if(lyricView()==LyricView::Rows)for(auto&item:groups){auto&g=item.second;bool stationary=staticInterlude(g);if((browseIndex>=0&&isInterlude(g)&&!stationary)||(emptyGroup(g)&&!indicatorVisible(g)&&!stationary))continue;bool visible=groupVisible(g,now);bool crosses=std::min(g.y.from,g.y.to)<=viewportBottom&&std::max(g.y.from,g.y.to)+g.renderedHeight(std::max(g.zoom.from,g.zoom.to))>=viewportTop;transitionActive=transitionActive||(g.y.active(now)&&crosses)||(visible&&(g.zoom.active(now)||(!stationary&&(g.mainAlpha.active(now)||g.subAlpha.active(now)||(!g.active&&!g.resetWords.empty()&&now-g.resetAt<200)))));}
+  bool layoutActive=false;for(const auto&item:groups){const auto&g=item.second;layoutActive=layoutActive||g.y.active(now)||g.zoom.active(now);}
+  manualTransition=manualTransition&&layoutActive;manualLayoutPending=false;
+  motion.setRunning(renderVisible&&valid&&!untimed&&(playing||manualTransition),animationWall());
   InvalidateRect(hwnd,nullptr,FALSE);schedule();
  }
  void paint(){PAINTSTRUCT ps{};BeginPaint(hwnd,&ps);if(renderVisible)try{ensureTarget();renderCalls++;target->BeginDraw();draw(graphics);HRESULT hr=target->EndDraw();if(hr==D2DERR_RECREATE_TARGET){graphics.clear();target.reset();}else if(FAILED(hr))error="draw-failed";}catch(...){graphics.clear();target.reset();error="render-target-failed";}EndPaint(hwnd,&ps);}
@@ -594,7 +605,7 @@ class App {
     if(through||dragProgress||resizing||lines.empty())return 0;POINT p{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};ScreenToClient(hwnd,&p);float x=p.x/scale(),y=p.y/scale();
     if(x<textX||x>width-12||y<viewportTop||y>viewportBottom)return 0;
     wheelRemainder+=GET_WHEEL_DELTA_WPARAM(wp);int steps=wheelRemainder/WHEEL_DELTA;wheelRemainder%=WHEEL_DELTA;if(!steps)return 0;
-    int next=browseStep(browseIndex>=0?browseIndex:index,steps);if(next<0)return 0;flight=LyricFlight();browseIndex=next;browseUntil=animationWall()+4000;if(!untimed)SetTimer(hwnd,4,4000,nullptr);layoutDirty=true;update();return 0;
+    int next=browseStep(browseIndex>=0?browseIndex:index,steps);if(next<0)return 0;flight=LyricFlight();browseIndex=next;manualTransition=manualLayoutPending=true;browseUntil=animationWall()+4000;if(!untimed)SetTimer(hwnd,4,4000,nullptr);layoutDirty=true;update();return 0;
    }
    case WM_MOUSEMOVE:{float x=GET_X_LPARAM(lp)/scale(),y=GET_Y_LPARAM(lp)/scale();if(resizing){POINT point;GetCursorPos(&point);int w=int(clamp(resizeSize.cx+point.x-resizeStart.x,360*scale(),900*scale())),h=int(clamp(resizeSize.cy+point.y-resizeStart.y,MinWindowHeight*scale(),240*scale()));if(w!=geometryPixels.cx||h!=geometryPixels.cy)SetWindowPos(hwnd,nullptr,0,0,w,h,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOCOPYBITS);}else if(dragProgress){dragRatio=transport.ratio(x);update();}else if(!hover&&!through){hover=true;TRACKMOUSEEVENT event{sizeof(event),TME_LEAVE,hwnd,0};TrackMouseEvent(&event);update();}return 0;}
    case WM_MOUSELEAVE:if(!dragProgress&&!resizing){hover=false;update();}return 0;

@@ -1,6 +1,6 @@
 # MiniLyrics
 
-Windows 原生桌面歌词小窗，基于 BetterNCM 与 RefinedNowPlayingNext。当前版本 **0.7.8**，作者 **shoebillback**。
+Windows 原生桌面歌词小窗，基于 BetterNCM 与 RefinedNowPlayingNext。当前版本 **0.7.9**，作者 **shoebillback**。
 
 显示端使用 C++ / Win32 / Direct2D / DirectWrite，JavaScript 负责歌词、播放信息及控制桥接。运行时无需安装 .NET、Node.js 或 WebView2。
 
@@ -76,3 +76,5 @@ powershell -NoProfile -File .\build.ps1 -SkipNativeBuild -OutputDirectory .\dist
 0.7.7 的诊断位于 `window.__miniLyrics.getDiagnostics().playerDiagnostics`：区分控制模块就绪、当前订阅状态、实际进度收取/接受时间、过滤原因及断流。时间戳在真实播放器环境中采用页面单调时钟，`progressAgeMs` 为最后一次接受实际 PlayProgress 后经过的毫秒数；尚未收到时为 null。历史保存位置和成功 Seek 分别标记为 restore、seek，不计入持续实际进度，也不凭保存位置确认跳转。`originalInitialization` 保持 unverified，不能据订阅成功断言原版已初始化。
 
 0.7.8 的播放按钮调用原版 playing/switchResumeOrPause，由原版状态决定播放或暂停。首次拖动进度条时，先写入原版恢复/加载位置并请求正常恢复播放；有 playId 且不处于恢复或首次加载时才直接跳转。加载中保留最近一次目标，暂停、切歌、关闭或卸载会取消 MiniLyrics 的后续补发。已建立会话后的暂停跳转保持暂停。初始化参考 InfLink V3 先解析 AudioPlayer，再接入 Bridge；不包装共享调用、不自动切换 Bridge。
+
+0.7.9 暂停时也支持滚轮平滑浏览：小步滚动沿用约 250 ms 的位置与字号过渡，连续滚动从当前画面接续，4 秒无操作后以约 500 ms 过渡返回当前句。动画结束立即停止帧循环；歌曲位置、逐字进度和背景流动保持暂停。大幅滚轮输入保留播放时的直接定位规则。仅运行暂停浏览专项检查，尚未替换已安装插件或验证实际网易云画面。

@@ -48,10 +48,8 @@ jobs:
           ./build.ps1
           $version = (Get-Content -LiteralPath ./manifest.json -Raw | ConvertFrom-Json).version
           "version=$version" >> $env:GITHUB_OUTPUT
-      - name: Run playback control focused checks
-        run: |
-          node --test tests/control-flow.test.cjs tests/control-flow-integration.test.cjs
-          if ($LASTEXITCODE -ne 0) { throw 'Playback control focused checks failed' }
+      - name: Run paused lyric browsing focused checks
+        run: ./tests/native.ps1 -Focus paused-browse
       - name: Stage market runtime
         env:
           SOURCE_COMMIT: ${{ github.sha }}
