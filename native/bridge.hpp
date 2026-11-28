@@ -112,6 +112,7 @@ class Bridge {
       if(!authenticated){if(m["type"].s()!="hello"||!constantTimeEqual(m["token"].s(),token))break;authenticated=true;
        // Authenticated silence does not imply that the player has exited.
        DWORD noTimeout=0;setsockopt(s,SOL_SOCKET,SO_RCVTIMEO,reinterpret_cast<char*>(&noTimeout),sizeof(noTimeout));}
+      else if(m["type"].s()=="hello")continue; // Only the handshake starts a session.
       receive(std::move(m));
      }catch(...){break;}
     }

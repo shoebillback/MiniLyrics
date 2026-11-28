@@ -27,7 +27,21 @@ test('open, close, reopen and dispose never read or alter native registrations',
  const f=fixture({noNativeEvents:true});let accesses=0;const original=f.context.channel;
  Object.defineProperty(f.context,'legacyNativeCmder',{get(){accesses++;throw Error('native bridge must remain untouched');}});
  f.context.channel=new Proxy(original,{get(){accesses++;throw Error('channel must remain untouched');},set(){accesses++;throw Error('channel must remain untouched');}});
- try{await f.open();f.emitTimeline(60000);f.advance(1000);f.config().children.find(c=>c.textContent==='关闭小窗').onclick();await f.open();f.dispose();
+ try{await f.open();f.emitTimeline(60000);f.advance(1000);f.configControl('miniLyrics-close').onclick();await f.open();f.dispose();
   assert.equal(accesses,0);
  }finally{f.dispose();}
 });
+test('seek timeout rejects stale timeline from an earlier song and cancels adapter once',()=>run(f=>{
+ let cancels=0;
+ f.api.cancelSeek=(...args)=>{if(args[1]===true)cancels++;};
+ f.seek(60000);
+ f.setInfo({...f.info()});
+ const orig=f.api.getTimeline;
+ f.api.getTimeline=()=>({songId:'old-song',currentTime:78000,totalTime:90000,source:'progress'});
+ f.advance(2600);
+ f.api.getTimeline=orig;
+ assert.equal(f.diagnostics().seekPending,false);
+ assert.equal(f.diagnostics().valid,false);
+ assert.notEqual(f.diagnostics().positionMs,78000);
+ assert.equal(cancels,1);
+}));

@@ -12,10 +12,12 @@ function fixture({late=false,saved=null}={}){
  const api=createPlayerAdapter(env),emit=(name,...args)=>{for(const fn of [...native.get(name)??[]])fn(...args);};
  return {api,env,chunks,native,commands,listeners,timers,emit,state:()=>state,update:patch=>{state={...state,playing:{...state.playing,...patch}};for(const fn of [...listeners])fn();},retry:()=>{const pending=[...timers.values()];timers.clear();pending.forEach(fn=>fn());}};
 }
-test('adapter starts without InfLink, updates late metadata, and does not require a cover',()=>{
- const f=fixture();try{assert.equal(f.api.ready,true);assert.equal(f.api.getCurrentSong().duration,0);
+test('adapter starts without InfLink and keeps the song reference until late metadata changes',()=>{
+ const f=fixture();try{assert.equal(f.api.ready,true);const first=f.api.getCurrentSong();assert.equal(first.duration,0);
  f.emit('PlayProgress','local-a',3);assert.equal(f.api.getTimeline().currentTime,3000);
+ assert.equal(f.api.getCurrentSong(),first);
  f.update({curTrack:{duration:90000},resourceCoverUrl:''});assert.equal(f.api.getTimeline().totalTime,90000);assert.equal(f.api.getCurrentSong().cover.url,'');
+ assert.notEqual(f.api.getCurrentSong(),first);
  }finally{f.api.dispose();}
 });
 test('old track state/progress/seek cannot corrupt the current song; native and Redux enums differ',()=>{
@@ -41,6 +43,19 @@ test('incomplete podcast metadata cannot let the previous track keep updating',(
   f.update({resourceTrackId:'voice-b',onlineResourceId:456,resourceType:'voice'});
   f.emit('PlayProgress','local-a',70);f.emit('Seek','voice-b','seek',0,50);
   assert.equal(f.api.getTimeline().currentTime,1000);
+ }finally{f.api.dispose();}
+});
+test('only verified online track IDs are exposed to the lyric provider',()=>{
+ const f=fixture();try{
+  assert.equal(f.api.getCurrentSong().lyricId,'123');
+  f.update({resourceTrackId:'456',onlineResourceId:undefined});assert.equal(f.api.getCurrentSong().lyricId,'');
+  f.update({resourceType:'track'});assert.equal(f.api.getCurrentSong().lyricId,'456');
+  f.update({resourceType:undefined,curTrack:{id:456}});assert.equal(f.api.getCurrentSong().lyricId,'456');
+  f.update({resourceType:'localTrack'});assert.equal(f.api.getCurrentSong().lyricId,'');
+  f.update({resourceType:'downloadVoice',onlineResourceId:456});assert.equal(f.api.getCurrentSong().lyricId,'');
+  f.update({resourceType:undefined});
+  f.update({onlineResourceId:456,trackFileType:'local'});assert.equal(f.api.getCurrentSong().lyricId,'');
+  f.update({trackFileType:'mp3',resourceIsCloudSong:true});assert.equal(f.api.getCurrentSong().lyricId,'');
  }finally{f.api.dispose();}
 });
 test('late discovery, disposal and repeated loading preserve other subscribers',()=>{
@@ -97,4 +112,40 @@ test('renamed webpack exports, throwing module getters, non-array artists, and r
   for(const fn of [...dTimers.values()]){dTimers.clear();fn();}
   assert.equal(dApi.ready,true);assert.equal(dPushes,1);
  }finally{dApi.dispose();}
+});
+test('MiniLyrics callback failures cannot interrupt later shared listeners',()=>{
+ const a={registerCallMap:{},registerCallStubs:{}};
+ a.queue=event=>a.registerCallStubs[event]??=(...args)=>{const entry=a.registerCallMap[event];if(entry)(Array.isArray(entry)?entry:[entry]).forEach(fn=>fn.apply(globalThis,args));};
+ const b={
+  appendRegisterCall(name,ns,fn){const ev=ns+'.on'+name;if(!a.registerCallMap[ev])a.registerCallMap[ev]=[];if(!Array.isArray(a.registerCallMap[ev]))a.registerCallMap[ev]=[a.registerCallMap[ev]];a.registerCallMap[ev].push(fn);},
+  removeRegisterCall(name,ns,fn){const entry=a.registerCallMap[ns+'.on'+name];if(Array.isArray(entry)){const i=entry.indexOf(fn);if(i>=0)entry.splice(i,1);}}
+ };
+ b._Adapter=a;
+ b.appendRegisterCall('PlayProgress','audioplayer',()=>{});
+ let state={playing:{resourceTrackId:'3437177548',onlineResourceId:3437177548,resourceArtists:[],playingState:2}};
+ const store={getState:()=>state,subscribe:()=>()=>{},dispatch:()=>{}};
+ const req={c:{store:{exports:{a:{app:{_store:store}}}},bridge:{exports:{Bridge:b}}}};
+ const chunks=[[]];chunks.push=entry=>Object.values(entry[1])[0]({}, {}, req);
+ const api=createPlayerAdapter({webpackJsonp:chunks,console,setTimeout,clearTimeout});
+ try{
+  const badPlaying={resourceTrackId:'3437177548',onlineResourceId:3437177548,playingState:2};
+  Object.defineProperty(badPlaying,'resourceArtists',{get(){throw new TypeError('malformed');}});
+  state={playing:badPlaying};
+  let later=0;
+  b.appendRegisterCall('PlayProgress','audioplayer',()=>later++);
+  assert.doesNotThrow(()=>a.queue('audioplayer.onPlayProgress')('3437177548_5D7DZG',195.899,1));
+  assert.equal(later,1);
+ }finally{api.dispose();}
+});
+test('string precision is preserved for large online IDs and isSeekSessionReady reflects readiness',()=>{
+ const f=fixture();
+ try{
+  assert.equal(f.api.isSeekSessionReady(),true);
+  f.update({resourceTrackId:'cloud-1',onlineResourceId:'9007199254740993'});
+  assert.equal(f.api.getCurrentSong().ncmId,'9007199254740993');
+  f.emit('PlayProgress','9007199254740993_abc',12);
+  assert.equal(f.api.getTimeline().currentTime,12000);
+  f.update({playId:null});
+  assert.equal(f.api.isSeekSessionReady(),false);
+ }finally{f.api.dispose();}
 });

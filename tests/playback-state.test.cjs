@@ -35,3 +35,17 @@ test('MiniLyrics forwards the corrected state and still honors a new pause event
   f.seek(50000);f.emitTimeline(50000,'Paused');assert.equal(f.diagnostics().playing,false);
  }finally{f.dispose();}
 });
+
+test('repeated external native seeks while paused do not infer playback',async()=>{
+ const f=fixture({actualPlayer:true});
+ try{
+  await f.open();
+  for(const fn of [...f.nativeEvents.get('audioplayer.PlayState')??[]])fn('local-a','pause',2);
+  assert.equal(f.diagnostics().playing,false);
+  f.emitNativeSeek(10,'s1','local-a');
+  f.advance(500);f.emitNativeSeek(10.5,'s2','local-a');
+  f.advance(500);f.emitNativeSeek(11,'s3','local-a');
+  assert.equal(f.diagnostics().playing,false);
+  assert.equal(f.diagnostics().positionMs,11000);
+ }finally{f.dispose();}
+});

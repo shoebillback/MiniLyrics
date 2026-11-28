@@ -1,7 +1,31 @@
 // DirectWrite/Win32 regression coverage of the production host implementation.
 // No player connection or hotkey. Focused input checks use an ephemeral
 // loopback listener without a client; production-procedure windows stay offscreen.
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#define _WIN32_WINNT 0x0A00
+#include <winsock2.h>
+#include <windows.h>
+namespace {
+ // Only the hover fixture substitutes cursor input and records tracking requests.
+ HWND hoverTestWindow=nullptr;
+ POINT hoverTestCursor{};
+ DWORD hoverTrackingFlags=0;
+ BOOL readCursor(LPPOINT cursor){
+  if(!hoverTestWindow)return GetCursorPos(cursor);
+  *cursor=hoverTestCursor;return TRUE;
+ }
+ BOOL trackMouse(LPTRACKMOUSEEVENT tracking){
+  if(tracking->hwndTrack!=hoverTestWindow)return TrackMouseEvent(tracking);
+  hoverTrackingFlags=tracking->dwFlags;return TRUE;
+ }
+}
+#undef NOMINMAX
+#define GetCursorPos readCursor
+#define TrackMouseEvent trackMouse
 #include "../native/Host.cpp"
+#undef TrackMouseEvent
+#undef GetCursorPos
 #include <iostream>
 #include <stdexcept>
 #include <cstring>
@@ -179,11 +203,16 @@ struct NativeTest {
  };
  static void startupPreview(){
   Fixture f;auto&a=f.a;f.lines(1);for(auto&line:a.lines)line.time+=5000;a.lines[0].text=L"Ready before playback";a.position=0;a.index=-1;a.valid=false;a.playing=false;a.updatePlaceholders();a.update();Surface surface;
+  surface.target->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
   const auto frame=[&](bool expected){surface.target->BeginDraw();surface.target->Clear(D2D1::ColorF(D2D1::ColorF::Black));
-   if(expected){const auto&p=a.group(a.preludePreview);a.text(surface.g,p.content->main,a.textX,a.lyricAnchor(),D2D1::ColorF(D2D1::ColorF::White));a.text(surface.g,p.content->subtitle,a.textX,a.lyricAnchor()+p.content->mainHeight+TranslationGap,D2D1::ColorF(D2D1::ColorF::White),.8f);}
+   if(expected){const auto&p=a.group(a.preludePreview);a.drawGroup(surface.g,p,a.preludePreview,0);}
    else a.drawLyrics(surface.g,0);
    check(surface.target->EndDraw());GdiFlush();return std::vector<BYTE>(surface.pixels,surface.pixels+Surface::width*Surface::height*4);};
-  auto actual=frame(false),expected=frame(true);int top=int(a.lyricAnchor()),bottom=int(a.lyricAnchor()+a.group(0).renderedHeight(1));require(std::equal(actual.begin()+top*Surface::width*4,actual.begin()+bottom*Surface::width*4,expected.begin()+top*Surface::width*4),"paused startup displays first lyric and translation before a clock sample");
+  auto actual=frame(false),expected=frame(true);int top=int(a.lyricAnchor()),bottom=int(a.lyricAnchor()+a.group(0).renderedHeight(1));
+  require(std::equal(actual.begin()+top*Surface::width*4,actual.begin()+bottom*Surface::width*4,expected.begin()+top*Surface::width*4),"paused startup displays first lyric and translation before a clock sample");
+  auto hasInk=[&](int y0,int y1){for(int y=y0;y<y1;++y)for(int x=0;x<Surface::width;++x){size_t i=(y*Surface::width+x)*4;if(actual[i]||actual[i+1]||actual[i+2])return true;}return false;};
+  const auto&p=a.group(a.preludePreview);
+  require(hasInk(top,int(a.lyricAnchor()+p.content->mainHeight))&&hasInk(int(a.lyricAnchor()+p.subtitleOffset(1)),bottom),"startup preview draws both main and subtitle bands");
   require(!a.valid&&!a.frameRunning&&a.position==0,"preview must not fabricate progress or schedule animation");
   Json clock=Json::obj();clock["type"]="clock";clock["position"]=15000;clock["playing"]=true;clock["valid"]=true;a.receive(clock);require(a.valid&&a.index==5,"first actual clock resumes normal lyric selection");
   std::cout<<"PASS: startup lyric preview without fabricated playback\n";
@@ -293,21 +322,20 @@ struct NativeTest {
  static void seekFlights(const std::filesystem::path&directory){
   {
    Fixture external;auto&x=external.a;external.lines(2);x.songId="external-test";x.playing=true;external.layout(10);
-   Json seek=Json::obj();seek["type"]="seek";seek["songId"]="stale-track";seek["position"]=41000;x.receive(seek);
-   require(x.flight.rows.empty()&&x.position==21000,"stale track seek ignored");seek["songId"]=x.songId;x.receive(seek);
+   Json clock=Json::obj();clock["type"]="clock";clock["songId"]="stale-track";clock["position"]=41000;clock["playing"]=true;clock["valid"]=true;x.receive(clock);
+   require(x.flight.rows.empty()&&x.position==21000,"stale track clock ignored");clock["songId"]=x.songId;x.receive(clock);
    require(!x.flight.rows.empty()&&x.index==20,"external seek uses the existing flight entry");
-   double started=x.flight.started;Json echo=Json::obj();echo["type"]="clock";echo["position"]=41000;echo["playing"]=true;echo["valid"]=true;x.receive(echo);
+   double started=x.flight.started;x.receive(clock);
    require(x.flight.started==started,"external seek timeline echo does not restart flight");
    float from=x.flight.rows[20].point.y;x.testWallMs+=300;x.update();require(x.flight.rows[20].point.y<from,"external seek has intermediate geometry");
-   float current=x.flight.rows[20].point.y;seek["position"]=11000;x.receive(seek);
+   float current=x.flight.rows[20].point.y;clock["position"]=11000;x.receive(clock);
    expectNear(x.flight.rows[20].point.y,current,"external rapid retarget starts at displayed frame");
    x.testWallMs+=1000;x.update();require(x.flight.rows.empty()&&x.index==5,"external backward seek completes");
-   x.playing=false;x.update();seek["position"]=41000;x.receive(seek);require(x.frameRunning,"paused external seek schedules flight");
+   x.playing=false;x.update();clock["playing"]=false;clock["position"]=41000;x.receive(clock);require(x.frameRunning,"paused external seek schedules flight");
    x.testWallMs+=1000;x.update();require(x.flight.rows.empty()&&!x.playing&&!x.frameRunning,"paused external seek finishes without resuming");
-   Json correction=Json::obj();correction["type"]="clock";correction["position"]=41100;correction["playing"]=false;correction["valid"]=true;x.receive(correction);
+   clock["position"]=41100;x.receive(clock);
    require(x.flight.rows.empty()&&x.index==20,"small clock correction does not start a seek flight");
-   // Since 0.6.31, actual timeline jumps are authoritative without a separate seek message.
-   correction["position"]=61000;x.receive(correction);
+   clock["position"]=61000;x.receive(clock);
    require(!x.flight.rows.empty()&&x.index==30&&!x.playing,"large actual clock jump animates while remaining paused");
    x.testWallMs+=1000;x.update();require(x.flight.rows.empty()&&!x.frameRunning,"paused timeline flight completes and stops scheduling");
   }
@@ -498,6 +526,31 @@ struct NativeTest {
   a.browseIndex=0;require(a.horizontalPhase(g,1350,0)==0,"manual browsing keeps the original aligned to its start");a.browseIndex=-1;
   a.playing=false;a.position=1350;auto paused=frame(a.current());a.testWallMs+=1000;require(frame(a.current())==paused,"paused playback holds word following without a separate scrolling clock");
   float atEnd=a.horizontalPhase(g,20000,0),atStart=a.horizontalPhase(g,0,0);require(atEnd==1&&atStart==0,"backward seeking immediately reanchors word following");
+  {
+   Fixture note;auto&host=note.a;host.width=360;host.height=130;host.viewportBottom=102;host.textX=30;
+   Line sustained;sustained.text=L"Long note";sustained.duration=2000;sustained.words={{sustained.text,0,2000,true}};
+   host.lines={sustained};host.valid=true;host.index=0;host.position=1200;note.layout(0);
+   auto&row=host.group(0);row.y.snap(40);
+   auto glowFrame=[&](){surface.target->BeginDraw();surface.target->Clear(D2D1::ColorF(D2D1::ColorF::Black));host.drawGroup(surface.g,row,0,host.current());check(surface.target->EndDraw());GdiFlush();return std::vector<BYTE>(surface.pixels,surface.pixels+Surface::width*Surface::height*4);};
+   const auto lit=glowFrame();host.testWallMs+=1000;require(glowFrame()==lit,"paused long note freezes the actual glow pixels");
+   row.content->glyphs[0].longNote=false;require(glowFrame()!=lit,"long note draws a visible native glow");
+   host.position=2500;const auto afterGlow=glowFrame();row.content->glyphs[0].longNote=true;require(glowFrame()==afterGlow,"finished glow leaves the ordinary lyric pixels unchanged");
+   Line second;second.text=L"B";second.time=2050;Line third;third.text=L"C";third.time=2100;
+   host.lines={sustained,second,third};host.index=2;host.position=2200;host.snapRow=true;note.layout(2);
+   auto&past=host.group(0);past.y.snap(40);past.zoom.snap(1);
+   const auto renderGlow=[&](){surface.target->BeginDraw();surface.target->Clear(D2D1::ColorF(D2D1::ColorF::Black));host.drawLyricGlowsAt(surface.g,host.current(),host.motionNow());check(surface.target->EndDraw());GdiFlush();};
+   const auto hasGlowPixels=[&](int left,int right){
+    for(int y=32;y<int(host.viewportBottom);++y)for(int x=left;x<right;++x){const auto pixel=surface.pixels+(y*Surface::width+x)*4;if(pixel[0]||pixel[1]||pixel[2])return true;}
+    return false;
+   };
+   host.artBounds=D2D1::RectF(0,40,25,75);renderGlow();
+   require(hasGlowPixels(27,30)&&!hasGlowPixels(0,27),"the fading first note survives two line changes and has room beside the cover");
+   host.textX=host.width-12-host.rowWidth(past);renderGlow();
+   require(hasGlowPixels(int(host.width)-12,int(host.width)-7)&&!hasGlowPixels(int(host.width)-7,int(host.width)),"right-edge glow uses the gutter and preserves the window border");
+   expectNear(note.interval(2200),17,"the older visible glow still requests animation frames");
+   expectNear(note.interval(2500),200,"a completed glow releases the animation schedule");
+   renderGlow();require(!hasGlowPixels(0,int(host.width)),"older glow clears at the end of its 500ms fade");
+  }
   Line plain;plain.time=0;plain.duration=4000;plain.text=std::wstring(100,L'W');a.lines={plain};a.groups.clear();a.focusIndex=-999;a.playing=true;f.layout(0);auto&untimed=a.group(0);
   require(a.horizontalPhase(untimed,899,0)==0&&std::abs(a.horizontalPhase(untimed,2100,0)-.5f)<.0001f&&a.horizontalPhase(untimed,3300,0)==1,"untimed long lyrics retain the existing delay and line-duration marquee");
   if(!directory.empty()){std::ofstream report(directory/"word-scroll-results.json");report<<"{\"pass\":true,\"scenarios\":3,\"maximumCursorCenterDeviationDip\":"<<maximumDeviation<<",\"nativePixels\":true,\"translationUnchanged\":true,\"wordGapsHold\":true,\"browsePauseSeek\":true,\"untimedFallback\":true}";}
@@ -653,7 +706,60 @@ struct NativeTest {
   if(!directory.empty()){std::ofstream report(directory/"moving-results.json");report<<metrics.dump();}
   std::cout<<"PASS: moving frames="<<frames<<", background="<<backgroundFrames<<" in "<<elapsed<<" ms; resume, pause and cleanup passed\n";
  }
+ static void windowRecovery(const std::filesystem::path&directory){
+  {
+   Fixture f;auto&a=f.a;
+   WNDCLASSW cls{};cls.hInstance=GetModuleHandleW(nullptr);cls.lpszClassName=L"MiniLyrics.HoverRecoveryTest";
+   cls.lpfnWndProc=[](HWND hwnd,UINT msg,WPARAM wp,LPARAM lp)->LRESULT{
+    if(msg==WM_NCLBUTTONDOWN){SetWindowLongPtrW(hwnd,GWLP_USERDATA,wp);return 0;}
+    return DefWindowProcW(hwnd,msg,wp,lp);
+   };
+   RegisterClassW(&cls);DestroyWindow(a.hwnd);
+   a.hwnd=CreateWindowExW(WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE,cls.lpszClassName,L"MiniLyrics hover recovery",WS_POPUP,-30000,-30000,600,240,nullptr,nullptr,cls.hInstance,nullptr);
+   require(a.hwnd!=nullptr,"create hover and caption input window");
+   struct ResetHoverProbe {~ResetHoverProbe(){hoverTestWindow=nullptr;}} resetHoverProbe;
+   hoverTestWindow=a.hwnd;hoverTestCursor={30,30};ClientToScreen(a.hwnd,&hoverTestCursor);
+   const auto path=directory.empty()?std::filesystem::temp_directory_path()/L"MiniLyrics-hover-recovery.json":directory/"hover-recovery.json";
+   a.settingsPath=path.wstring();
+   a.hover=true;a.dragProgress=true;hoverTrackingFlags=0;a.message(WM_CAPTURECHANGED,0,0);
+   require(!a.dragProgress&&a.hover&&hoverTrackingFlags==TME_LEAVE,"ending a transport drag rearms leave tracking inside the client");
+   a.resizing=true;hoverTrackingFlags=0;a.message(WM_CAPTURECHANGED,0,0);
+   require(!a.resizing&&a.hover&&hoverTrackingFlags==TME_LEAVE,"ending a resize rearms leave tracking inside the client");
+   a.systemMoving=true;hoverTrackingFlags=0;a.message(WM_EXITSIZEMOVE,0,0);
+   require(!a.systemMoving&&a.hover&&hoverTrackingFlags==TME_LEAVE,"ending a caption move rearms leave tracking");
+   a.message(WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(30,int(a.transport.y)));
+   require(GetWindowLongPtrW(a.hwnd,GWLP_USERDATA)==HTCAPTION,"cover bottom clicks reach the caption drag path");
+   {std::ofstream saved(path);saved<<"unchanged";}
+   hoverTrackingFlags=0;a.finishMenu(0);
+   require(a.hover&&hoverTrackingFlags==TME_LEAVE,"dismissing the menu rearms leave tracking");
+   a.finishMenu(3);
+   require(a.through&&!a.hover&&hoverTrackingFlags==(TME_CANCEL|TME_LEAVE),"pass-through hides the toolbar and cancels leave tracking");
+   std::ifstream saved(path);std::string content((std::istreambuf_iterator<char>(saved)),{});
+   require(content=="unchanged","dismissing the menu and toggling pass-through skip settings writes");
+   a.setThrough(false);a.message(WM_MOUSELEAVE,0,0);
+   require(!a.hover,"mouse leave hides the toolbar after recovery");
+  }
+  {
+   Fixture f;auto&a=f.a;
+   check(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,a.factory.put()));
+   SetWindowPos(a.hwnd,nullptr,-30000,-30000,0,0,SWP_NOSIZE|SWP_NOACTIVATE|SWP_NOZORDER|SWP_SHOWWINDOW);
+   a.update();a.paint();require(a.target&&!a.frameRunning,"paused window draws without an active frame timer");
+   for(unsigned attempt=0;attempt<=App::MaxTargetLossRetries;attempt++){
+    ValidateRect(a.hwnd,nullptr);a.finishDraw(static_cast<HRESULT>(D2DERR_RECREATE_TARGET));
+    require(!a.target&&!a.graphics.target,"device loss releases Direct2D resources");
+    require(bool(GetUpdateRect(a.hwnd,nullptr,FALSE))==(attempt<App::MaxTargetLossRetries),"paused device loss queues a bounded repaint");
+   }
+   a.renderVisible=false;ValidateRect(a.hwnd,nullptr);a.finishDraw(static_cast<HRESULT>(D2DERR_RECREATE_TARGET));
+   require(!GetUpdateRect(a.hwnd,nullptr,FALSE),"hidden device loss does not queue another repaint");
+   a.renderVisible=true;InvalidateRect(a.hwnd,nullptr,FALSE);a.paint();
+   require(a.target&&a.targetLossRetries==0&&a.error.empty(),"a successful redraw restores resources and resets retry budget");
+   a.finishDraw(static_cast<HRESULT>(D2DERR_RECREATE_TARGET));
+   require(GetUpdateRect(a.hwnd,nullptr,FALSE)&&!a.frameRunning,"a later device loss schedules recovery while paused");
+  }
+  std::cout<<"PASS: hover rearming, cover caption dragging, menu saves and paused device recovery\n";
+ }
  static void regressions(const std::filesystem::path&directory,bool includeGpu){
+  windowRecovery(directory);
   struct Sockets {Sockets(){WSADATA data{};require(WSAStartup(MAKEWORD(2,2),&data)==0,"initialize regression sockets");}~Sockets(){WSACleanup();}} sockets;
   // 1. Bridge fragmented WebSocket text frames, interleaved ping, and concurrent send/stop.
   {
@@ -678,6 +784,7 @@ struct NativeTest {
     require(send(sock,f.data(),int(f.size()),0)==int(f.size()),"send masked WS frame");
    };
    sendWs(true,1,"{\"type\":\"hello\",\"token\":\""+secret+"\"}");
+   sendWs(true,1,"{\"type\":\"hello\",\"token\":\""+secret+"\"}");
    sendWs(false,1,"{\"type\":\"lyrics\",");
    sendWs(true,9,"hi");
    sendWs(true,0,"\"songId\":\"frag\"}");
@@ -686,7 +793,7 @@ struct NativeTest {
     {std::lock_guard<std::mutex> lock(rxMutex);if(received.size()>=2)break;}
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
    }
-   {std::lock_guard<std::mutex> lock(rxMutex);require(received.size()==2&&received[1]["type"].s()=="lyrics"&&received[1]["songId"].s()=="frag","fragmented text frame assembled across interleaved ping");}
+   {std::lock_guard<std::mutex> lock(rxMutex);require(received.size()==2&&received[0]["type"].s()=="hello"&&received[1]["type"].s()=="lyrics"&&received[1]["songId"].s()=="frag","one session hello followed by fragmented text across interleaved ping");}
    unsigned char pongHdr[2]{};require(recv(sock,reinterpret_cast<char*>(pongHdr),2,0)==2,"receive pong header");
    require((pongHdr[0]&0x0f)==10&&(pongHdr[1]&0x7f)==2,"interleaved ping answered with pong");
    char pongBody[2]{};require(recv(sock,pongBody,2,0)==2&&pongBody[0]=='h'&&pongBody[1]=='i',"pong payload intact");
@@ -714,12 +821,69 @@ struct NativeTest {
    require(saved["X"].n()==normal.left&&saved["Y"].n()==normal.top,"minimized save preserves X/Y instead of -32000");
    require(saved["Width"].n()>=360&&saved["Height"].n()>=130,"minimized save preserves normal dimensions");
   }
-  // 3. ping clears connectionStale and error="disconnected".
+  // 3. ping clears connectionStale and error="disconnected" without unfreezing playback.
   {
-   Fixture f;auto&a=f.a;a.freezeConnection();
-   require(a.connectionStale&&a.error=="disconnected","freeze sets disconnected state");
+   Fixture f;auto&a=f.a;a.playing=true;a.valid=true;a.freezeConnection();
+   require(a.connectionStale&&a.error=="disconnected"&&!a.playing,"freeze sets disconnected state and pauses playback");
    Json ping=Json::obj();ping["type"]="ping";a.receive(ping);
-   require(!a.connectionStale&&a.error.empty(),"ping clears stale disconnected state");
+   require(!a.connectionStale&&a.error.empty()&&!a.playing,"ping clears stale disconnected state without resuming playback");
+  }
+  {
+   Fixture f;auto&a=f.a;f.lines();a.songId="same-song";a.seekSerial=7;a.seekRequest=7;a.seekPending=true;
+   Json clock=Json::obj();clock["type"]="clock";clock["songId"]=a.songId;clock["position"]=27000;clock["valid"]=true;clock["seekRequest"]=0;
+   a.receive(clock);require(a.position==21000&&a.seekPending,"old session seek blocks clock before a new handshake");
+   // A new peer can authenticate before the UI handles the old disconnect.
+   Json hello=Json::obj();hello["type"]="hello";a.receive(hello);
+   require(!a.seekPending&&a.seekRequest==0&&a.seekSerial==7,"hello clears the old request and preserves the seek serial");
+   a.receive(clock);require(a.position==27000&&a.valid,"first clock for the same song is accepted after hello");
+   a.message(WM_TIMER,3,0);require(a.position==27000&&a.error.empty(),"a queued timeout cannot restore the old position");
+  }
+  // 3b. Host seek timeout clears seekRequest so later ordinary clocks are accepted.
+  {
+   Fixture f;auto&a=f.a;f.lines();a.songId="timeout-song";
+   a.bridge=std::make_unique<Bridge>(0,std::string(32,'s'),[](Json){});
+   a.requestSeek(30000);
+   require(a.seekPending&&a.seekRequest>0,"requestSeek sets seekPending and seekRequest");
+   a.message(WM_TIMER,3,0);
+   require(!a.seekPending&&a.seekRequest==0&&a.error=="seek-timeout","seek timeout clears both seekPending and seekRequest");
+   Json clock=Json::obj();clock["type"]="clock";clock["songId"]=a.songId;clock["position"]=27000;clock["valid"]=true;clock["playing"]=true;clock["seekRequest"]=0;
+   a.receive(clock);
+   require(a.position==27000&&a.valid&&a.playing,"ordinary clock after seek timeout is accepted");
+  }
+  // 3c. Cover worker delivers permanent 404 errors immediately without retrying.
+  {
+   SOCKET srv=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);require(srv!=INVALID_SOCKET,"create cover test server");
+   sockaddr_in addr{};addr.sin_family=AF_INET;addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+   require(bind(srv,reinterpret_cast<sockaddr*>(&addr),sizeof(addr))==0&&listen(srv,4)==0,"listen cover test server");
+   int addrLen=sizeof(addr);require(getsockname(srv,reinterpret_cast<sockaddr*>(&addr),&addrLen)==0,"read cover test port");
+   std::atomic<int> hits{0};std::atomic<bool> stopSrv{false};
+   std::thread serverThread([&]{
+    while(!stopSrv){
+     fd_set fds;FD_ZERO(&fds);FD_SET(srv,&fds);timeval tv{0,50000};
+     if(select(0,&fds,nullptr,nullptr,&tv)<=0)continue;
+     SOCKET c=accept(srv,nullptr,nullptr);if(c==INVALID_SOCKET)break;
+     ++hits;char buf[1024];recv(c,buf,sizeof(buf),0);
+     const char*resp="HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+     send(c,resp,int(std::strlen(resp)),0);closesocket(c);
+    }
+   });
+   Fixture f;auto&a=f.a;DestroyWindow(a.hwnd);a.hwnd=nullptr;
+   WNDCLASSW cls{};cls.lpfnWndProc=App::procedure;cls.hInstance=GetModuleHandleW(nullptr);cls.lpszClassName=L"MiniLyrics.CoverWorkerRegTest";RegisterClassW(&cls);
+   a.hwnd=CreateWindowExW(0,cls.lpszClassName,L"Cover worker reg",WS_POPUP,-30000,-30000,100,100,nullptr,nullptr,cls.hInstance,&a);
+   require(a.hwnd!=nullptr,"create cover worker test window");
+   a.startCoverWorker();
+   std::wstring url=L"http://127.0.0.1:"+std::to_wstring(ntohs(addr.sin_port))+L"/404.png";
+   a.loadCover(url);
+   double deadline=nowMs()+2500;bool delivered=false;MSG msg{};
+   while(nowMs()<deadline&&!delivered){
+    while(PeekMessageW(&msg,a.hwnd,0,0,PM_REMOVE)){
+     if(msg.message==App::CoverReady)delivered=true;
+     TranslateMessage(&msg);DispatchMessageW(&msg);
+    }
+    if(!delivered)std::this_thread::sleep_for(std::chrono::milliseconds(10));
+   }
+   a.stopCoverWorker();stopSrv=true;closesocket(srv);serverThread.join();
+   require(delivered&&hits.load()==1&&a.cover.status==CoverStatus::PermanentError&&a.coverUrl==url,"permanent cover failure does not retry and preserves coverUrl");
   }
   // 4. untimed first wheel-down notch advances and animates cleanly.
   {
@@ -770,8 +934,546 @@ struct NativeTest {
   }
   std::cout<<"PASS: fragmented WS/concurrency, minimized save, ping recovery, untimed wheel, min-track size, preview snap"<<(includeGpu?" and shader cache":"")<<"\n";
  }
+ static void modernEffects(){
+  // 1. Offscreen 1.0-scale RowTexture eliminates zoom=1.0 hinting jump and reuses textures.
+  {
+   Fixture f;auto&a=f.a;a.textX=32;a.index=0;a.valid=true;a.hasClock=true;
+   Line line;line.time=0;line.duration=5000;line.text=L"Mixed 中文测试 Smooth";line.translation=L"Translation line";
+   a.lines={line};auto&row=a.group(0);row.y.snap(38);row.mainAlpha.snap(.86f);row.subAlpha.snap(.58f);
+   Surface surface;surface.target->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+   auto renderZoom=[&](float z){
+    row.zoom.snap(z);
+    surface.target->BeginDraw();surface.target->Clear(D2D1::ColorF(D2D1::ColorF::Black));
+    a.drawGroup(surface.g,row,0,0);check(surface.target->EndDraw());GdiFlush();
+    return std::vector<BYTE>(surface.pixels,surface.pixels+Surface::width*Surface::height*4);
+   };
+   auto approaching=renderZoom(.9999f);
+   auto builds=surface.g.rowTextureBuilds;
+   require(builds>=1,"offscreen row texture built on first draw");
+   auto settled=renderZoom(1.f);
+   require(surface.g.rowTextureBuilds==builds,"zoom transition reuses cached row texture without rebuild");
+   unsigned maxDelta=0;
+   for(size_t p=0;p<approaching.size();p+=4){
+    unsigned d=std::abs(int(approaching[p+1])-int(settled[p+1]));
+    maxDelta=std::max(maxDelta,d);
+   }
+   require(maxDelta<=8,"zoom=0.9999 -> 1.0 has no glyph hinting jump");
+   surface.g.clear();
+   require(surface.g.rowTextures.empty(),"graphics.clear() releases cached row textures");
+   check(surface.target->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White),surface.g.brush.put()));
+   surface.g.target=surface.target.get();
+   require(renderZoom(1.f)==settled,"rebuilt row texture matches after clear");
+  }
+  // 2. Gradient word sweep (wordMode=1) produces smooth left-to-right progress and matches endpoints.
+  {
+   Fixture f;auto&a=f.a;a.textX=20;a.index=0;a.valid=true;a.hasClock=true;a.playing=true;
+   Line line;line.time=1000;line.duration=2000;line.text=L"Sweeping";
+   line.words={{L"Sweeping",1000,1000,false}};
+   a.lines={line};auto&row=a.group(0);row.y.snap(40);row.zoom.snap(1.f);row.active=true;
+   Surface surface;surface.target->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+   auto renderAt=[&](int mode,double time){
+    a.wordMode=mode;
+    surface.target->BeginDraw();surface.target->Clear(D2D1::ColorF(D2D1::ColorF::Black));
+    a.drawGroup(surface.g,row,0,time);check(surface.target->EndDraw());GdiFlush();
+    return std::vector<BYTE>(surface.pixels,surface.pixels+Surface::width*Surface::height*4);
+   };
+   auto fadeUnsung=renderAt(0,1000),fadeSung=renderAt(0,2000);
+   auto sweepStart=renderAt(1,1000),sweepMid=renderAt(1,1500),sweepEnd=renderAt(1,2000);
+   require(sweepStart==fadeUnsung,"sweep start matches unsung 0.4 alpha pixels");
+   require(sweepEnd==fadeSung,"sweep end matches full 1.0 alpha pixels");
+   require(sweepMid!=sweepStart&&sweepMid!=sweepEnd,"sweep midpoint renders intermediate gradient");
+   const float wordW=row.content->glyphs[0].layout.width;
+   int x0=int(a.textX),xMidLeft=int(a.textX+wordW*.35f),xMidRight=int(a.textX+wordW*.65f),xEnd=int(a.textX+wordW+4);
+   uint64_t leftSum=0,rightSum=0;
+   for(int y=35;y<80;++y){
+    for(int x=x0;x<xMidLeft;++x)leftSum+=sweepMid[(y*Surface::width+x)*4+1];
+    for(int x=xMidRight;x<xEnd;++x)rightSum+=sweepMid[(y*Surface::width+x)*4+1];
+   }
+   require(leftSum>rightSum*1.4,"sweep midpoint is brighter on the left than on the right");
+  }
+  // 3. Spring curve (lineCurve=4) inherits velocity on retarget and settles cleanly.
+  {
+   Fixture f;auto&a=f.a;f.lines();a.playing=true;a.valid=true;f.layout(10);
+   Json style=Json::obj();style["type"]="style";style["curve"]=4;style["stagger"]=true;style["wordMode"]=1;
+   a.receive(style);
+   require(a.lineCurve==4&&a.wordMode==1,"style message applies spring curve and sweep wordMode");
+   f.wheel(-120);
+   require(a.browseIndex==11&&a.group(11).y.spring&&a.group(11).zoom.spring,"spring curve enables LineTrack spring mode");
+   a.testWallMs+=80;a.update();
+   const float yBefore=a.group(12).y.value(a.motionNow());
+   const double vBefore=a.group(12).y.velocity(a.motionNow());
+   require(std::abs(vBefore)>1.,"spring builds non-zero velocity mid-flight");
+   f.wheel(-120);
+   expectNear(a.group(12).y.value(a.motionNow()),yBefore,"spring retarget keeps continuous position");
+   require(std::abs(a.group(12).y.velocity(a.motionNow())-vBefore)<1e-2,"spring retarget inherits instantaneous velocity");
+   a.testWallMs+=3000;a.update();
+   require(!a.transitionActive&&!a.manualTransition,"spring motion settles completely within 3s");
+  }
+  // 4. Long-note tail handoff across <4s gap and early cutoff release without jump.
+  {
+   Fixture f;auto&a=f.a;a.valid=true;a.playing=true;
+   Line l0,l1;
+   l0.time=0;l0.duration=2000;l0.text=L"Hold";l0.words={{L"Hold",0,2000,true}};
+   l1.time=4000;l1.duration=1000;l1.text=L"Next";l1.words={{L"Next",4000,1000,false}};
+   a.lines={l0,l1};a.index=0;a.position=3000;f.layout(0);
+   double now=a.motionNow();
+   require(a.wordGlowIntensity(a.group(0),0,0,3000,now)>.12f,"tail handoff holds ember across 2s vocal gap");
+   require(a.wordGlowIntensity(a.group(0),0,0,4125,now)>.04f&&a.wordGlowIntensity(a.group(0),0,0,4125,now)<.12f,"tail handoff fades out over 250ms after next line starts");
+   require(a.wordGlowIntensity(a.group(0),0,0,4250,now)==0.f,"tail handoff clears after 250ms release");
+   // Early cutoff before 35% of word duration fades out from captured intensity.
+   a.position=400;a.index=0;a.group(0).active=true;a.group(0).resetGlows.clear();
+   a.index=1;a.roles();
+   const float captured=a.wordGlowIntensity(a.group(0),0,0,400,now);
+   expectNear(captured,longNoteGlow(400,2000),"early cutoff captures 35% ease-out attack glow intensity");
+   require(captured>.7f&&captured<.95f,"early cutoff uses smooth fast-attack intensity without jumping");
+   require(a.wordGlowIntensity(a.group(0),0,0,400,now+200)==0.f,"early cutoff completes within 200ms");
+  }
+  // 5. Interlude exit anticipation draws cleanly in final 750ms and 375ms.
+  {
+   Fixture f;auto&a=f.a;a.textX=20;a.valid=true;a.playing=true;
+   InterludeAnimation ia;ia.update(true,true,0,5550,0,6000);
+   Surface surface;
+   auto drawDots=[&](double time){
+    surface.target->BeginDraw();surface.target->Clear(D2D1::ColorF(D2D1::ColorF::Black));
+    a.drawInterludeAt(surface.g,ia,20,40,time,0,6000,1000.);
+    check(surface.target->EndDraw());GdiFlush();
+    uint64_t sum=0;for(size_t i=0;i<Surface::width*Surface::height*4;i+=4)sum+=surface.pixels[i+1];return sum;
+   };
+   require(drawDots(5550)>0&&drawDots(5800)>0&&drawDots(6000)==0,"interlude exit swell and alpha fade render cleanly");
+  }
+  // 6. P1 #1: Ultra-wide single word (>4096 px) tiles cleanly and draws scrolled tail in fade & sweep modes.
+  {
+   Fixture f;auto&a=f.a;a.width=480;a.height=160;a.viewportBottom=132;a.textX=20;a.valid=true;a.hasClock=true;a.playing=true;a.index=0;
+   std::wstring hugeWord;
+   for(int i=0;i<600;i++)hugeWord+=L"W";
+   Line line;line.time=0;line.duration=10000;line.text=hugeWord;line.words={{hugeWord,0,10000,false}};
+   a.lines={line};auto&row=a.group(0);row.y.snap(40);row.zoom.snap(1.f);row.active=true;
+   require(row.content->glyphs[0].layout.width>4500.f,"ultra-wide word fixture exceeds 4096 DIP");
+   Surface surface;surface.target->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+   for(int mode:{0,1}){
+    a.wordMode=mode;
+    surface.target->BeginDraw();surface.target->Clear(D2D1::ColorF(D2D1::ColorF::Black));
+    a.drawGroup(surface.g,row,0,9800);check(surface.target->EndDraw());GdiFlush();
+    const auto&wordsAtlas=surface.g.rowTextures[row.content->serial].words;
+    require(wordsAtlas.ready&&wordsAtlas.itemSpans.size()==1&&wordsAtlas.itemSpans[0].count>=2,"ultra-wide word splits into multiple slices");
+    uint64_t ink=0;
+    for(int y=40;y<75;++y)for(int x=int(a.textX);x<int(a.width-20);++x)ink+=surface.pixels[(y*Surface::width+x)*4+1];
+    require(ink>0,"ultra-wide word scrolled to tail retains visible ink");
+   }
+  }
+  // 7. P1 #2: Mid-sweep line deactivation fades out from captured sweep mask without a brightness flash.
+  {
+   Fixture f;auto&a=f.a;a.textX=20;a.valid=true;a.hasClock=true;a.playing=true;a.wordMode=1;
+   Line l0,l1;
+   l0.time=0;l0.duration=2000;l0.text=L"SweepingWord";l0.words={{L"SweepingWord",0,2000,false}};
+   l1.time=1000;l1.duration=1000;l1.text=L"Overlap";l1.words={{L"Overlap",1000,1000,false}};
+   a.lines={l0,l1};a.index=0;a.position=1000;a.freezePlayback=true;f.layout(0);
+   auto&row=a.group(0);row.y.snap(40);row.zoom.snap(1.f);row.mainAlpha.snap(1.f);
+   Surface surface;surface.target->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+   auto renderRow=[&](double time){
+    surface.target->BeginDraw();surface.target->Clear(D2D1::ColorF(D2D1::ColorF::Black));
+    a.drawGroup(surface.g,row,0,time);check(surface.target->EndDraw());GdiFlush();
+    return std::vector<BYTE>(surface.pixels,surface.pixels+Surface::width*Surface::height*4);
+   };
+   const auto beforeCut=renderRow(1000);
+   a.index=1;a.roles();
+   row.mainAlpha.snap(1.f);
+   const auto rightAfterCut=renderRow(1000);
+   unsigned cutDiff=0;
+   for(size_t i=0;i<beforeCut.size();i+=4)cutDiff=std::max<unsigned>(cutDiff,std::abs(int(beforeCut[i+1])-int(rightAfterCut[i+1])));
+   require(cutDiff<=1,"mid-sweep deactivation first frame matches active sweep pixels without brightness jump");
+   a.testWallMs+=100;
+   const auto midFade=renderRow(1000);
+   require(midFade!=rightAfterCut,"deactivated sweep mask fades during the 200ms release");
+   a.testWallMs+=100;
+   const auto settled=renderRow(1000);
+   a.wordMode=0;
+   const auto uniformInactive=renderRow(1000);
+   require(settled==uniformInactive,"sweep release settles cleanly to 0.4 inactive brightness at 200ms");
+  }
+  // 8. P1 #3: Paused seek clears stale long-note resetGlows so glow does not stay frozen after seek completes.
+  {
+   Fixture f;auto&a=f.a;a.width=360;a.height=240;a.viewportBottom=212;a.textX=20;a.valid=true;a.playing=true;
+   Line l0,l1,l2;
+   l0.time=0;l0.duration=2000;l0.text=L"Hold";l0.words={{L"Hold",0,2000,true}};
+   l1.time=500;l1.duration=1000;l1.text=L"Cut";l1.words={{L"Cut",500,1000,false}};
+   l2.time=1000;l2.duration=1000;l2.text=L"Later";l2.words={{L"Later",1000,1000,false}};
+   a.lines={l0,l1,l2};a.position=500;a.index=1;f.layout(0);
+   a.group(0).active=true;a.group(0).resetGlows.clear();
+   a.roles();
+   require(!a.group(0).resetGlows.empty(),"early cutoff captures release glow");
+   a.playing=false;a.update();
+   const float frozenGlow=a.wordGlowIntensity(a.group(0),0,0,500,a.motionNow());
+   require(frozenGlow>0.1f,"ordinary pause preserves frozen release glow");
+   a.seekTo(1100);a.update();
+   a.testWallMs+=1000;a.update();
+   require(a.flight.rows.empty()&&!a.frameRunning,"paused seek finishes and stops animation timer");
+   const auto&old=a.groups.at(0);
+   require(a.groupVisible(old,a.motionNow())&&old.resetGlows.empty()&&a.wordGlowIntensity(old,0,0,a.current(),a.motionNow())==0.f,
+           "paused seek does not relight a visible inactive word whose nominal interval still covers the destination");
+  }
+  // 9. P1 #5: Explicit interlude stops 60 FPS scheduling once exitAlpha reaches 0 while preserving next-line wakeup.
+  {
+   Fixture f;auto&a=f.a;a.width=600;a.height=160;a.viewportBottom=132;a.textX=20;a.valid=true;a.playing=true;a.fps=60;
+   Line gap,next;
+   gap.time=0;gap.duration=2000;gap.isInterlude=true;
+   next.time=22000;next.duration=1000;next.text=L"Resume";
+   a.lines={gap,next};a.index=0;a.position=1000;f.layout(0);
+   a.testWallMs+=1000;a.updateIndicators();
+   expectNear(f.interval(1000),17,"active visible explicit interlude uses 60 FPS");
+   a.position=3000;a.updateIndicators();
+   require(!a.indicatorVisible(a.group(0),0,3000),"explicit interlude becomes invisible once exitAlpha reaches 0");
+   expectNear(f.interval(3000),200,"elapsed explicit interlude drops back to low-frequency idle waiting");
+   expectNear(f.interval(21750),50,"idle interlude still wakes accurately for the next lyric lookahead");
+  }
+  // 10. P1 #6 & P2 #10: Toggling wordMode or switching curve mid-motion preserves active spring without snapping or velocity jump.
+  {
+   Fixture f;auto&a=f.a;f.lines();a.playing=false;a.valid=true;f.layout(10);
+   Json springStyle=Json::obj();springStyle["type"]="style";springStyle["curve"]=4;springStyle["stagger"]=true;springStyle["wordMode"]=0;
+   a.receive(springStyle);
+   f.wheel(-120);
+   a.testWallMs+=60;a.update();
+   const float yBefore=a.group(11).y.value(a.motionNow());
+   const float zBefore=a.group(11).zoom.value(a.motionNow());
+   const double vBefore=a.group(11).y.velocity(a.motionNow());
+   require(a.manualTransition&&a.group(11).y.active(a.motionNow()),"paused browse starts active spring");
+   Json wmOnly=Json::obj();wmOnly["type"]="style";wmOnly["curve"]=4;wmOnly["stagger"]=true;wmOnly["wordMode"]=1;
+   a.receive(wmOnly);
+   expectNear(a.group(11).y.value(a.motionNow()),yBefore,"wordMode change during paused browse does not snap Y");
+   expectNear(a.group(11).zoom.value(a.motionNow()),zBefore,"wordMode change during paused browse does not snap zoom");
+   require(a.wordMode==1&&a.manualTransition&&a.group(11).y.active(a.motionNow()),"wordMode applies without aborting paused browse spring");
+   Json toBezier=Json::obj();toBezier["type"]="style";toBezier["curve"]=0;toBezier["stagger"]=true;toBezier["wordMode"]=1;
+   a.receive(toBezier);
+   a.testWallMs+=1;
+   const double vAfter=a.group(11).y.velocity(a.motionNow());
+   require(a.lineCurve==0&&a.group(11).y.spring&&std::abs(vAfter-vBefore)<50.,"switching from spring to bezier lets active spring finish without velocity jump");
+   f.wheel(-120);
+   require(!a.group(12).y.spring&&a.group(12).y.curve==0,"new bezier curve applies on the next transition");
+  }
+  // 11. P2 #7: Ultra-wide plain line tile seam at non-integer zoom (0.763x) matches unsplit continuous bitmap reference.
+  {
+   Fixture f;auto&a=f.a;a.width=600;a.height=160;a.viewportBottom=132;a.textX=20;a.valid=true;a.hasClock=true;a.playing=true;a.index=0;
+   std::wstring wideLine;
+   for(int i=0;i<500;i++)wideLine+=L"W";
+   Line line;line.time=0;line.duration=10000;line.text=wideLine;
+   a.lines={line};auto&row=a.group(0);row.y.snap(40);row.zoom.snap(.763f);row.mainAlpha.snap(1.f);
+   const float available=a.width-a.textX-12.f,total=a.rowWidth(row),overflow=total*.763f-available;
+   // Scroll so 4092 px boundary (~4090 DIP at 96 DPI) falls cleanly inside the viewport.
+   const double seamTime=900.+(4090.*.763f-available*.5f)/std::max(1.f,overflow)*8400.;
+   Surface surface,refSurface;
+   surface.target->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+   refSurface.target->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+   surface.target->BeginDraw();surface.target->Clear(D2D1::ColorF(D2D1::ColorF::Black));
+   a.drawGroup(surface.g,row,0,seamTime);
+   check(surface.target->EndDraw());GdiFlush();
+   const auto&mainAtlas=surface.g.rowTextures[row.content->serial].main;
+   require(mainAtlas.ready&&mainAtlas.slices.size()>=2,"ultra-wide plain line splits into multiple tiles");
+   const auto&tile0=mainAtlas.slices[0];
+   const float seamDip=tile0.clipRight;
+   const float refLeft=std::floor(seamDip-512.f);
+   const UINT refW=1024u,refH=std::max(1u,UINT(std::round(tile0.height)));
+   Com<ID2D1BitmapRenderTarget> refRt;
+   const auto refDip=D2D1::SizeF(float(refW),float(refH));
+   const auto refPx=D2D1::SizeU(refW,refH);
+   const auto refFmt=D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,D2D1_ALPHA_MODE_PREMULTIPLIED);
+   check(refSurface.target->CreateCompatibleRenderTarget(&refDip,&refPx,&refFmt,D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE,refRt.put()));
+   refRt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+   Com<ID2D1SolidColorBrush> refWhite;check(refRt->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White),refWhite.put()));
+   refRt->BeginDraw();refRt->Clear(D2D1::ColorF(0.f,0.f,0.f,0.f));
+   refRt->DrawTextLayout(D2D1::Point2F(-refLeft,-tile0.top),row.content->main.value.get(),refWhite.get(),D2D1_DRAW_TEXT_OPTIONS_NONE);
+   check(refRt->EndDraw());
+   Com<ID2D1Bitmap> refBmp;check(refRt->GetBitmap(refBmp.put()));
+   const float scrollX=overflow*a.timedHorizontalPhase(row,seamTime,0),rowLeft=a.textX-scrollX;
+   const float seamScreenX=rowLeft+seamDip*.763f;
+   require(seamScreenX>=60.f&&seamScreenX<=540.f,"tile seam lies inside the compared viewport region");
+   const D2D1_RECT_F refDst=D2D1::RectF(rowLeft+refLeft*.763f,40.f+tile0.top*.763f,rowLeft+(refLeft+float(refW))*.763f,40.f+(tile0.top+float(refH))*.763f);
+   refSurface.target->BeginDraw();refSurface.target->Clear(D2D1::ColorF(D2D1::ColorF::Black));
+   refSurface.target->DrawBitmap(refBmp.get(),refDst,1.f,D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+   check(refSurface.target->EndDraw());GdiFlush();
+   int maxDiff=0;uint64_t seamInk=0;
+   for(int y=40;y<75;++y)for(int x=40;x<560;++x){
+    const int p=surface.pixels[(y*Surface::width+x)*4+1],q=refSurface.pixels[(y*Surface::width+x)*4+1];
+    maxDiff=std::max(maxDiff,std::abs(p-q));
+    if(std::abs(x-int(std::round(seamScreenX)))<=8)seamInk+=p;
+   }
+   require(seamInk>0,"tile seam region contains rendered glyph ink");
+   require(maxDiff<=2,"tiled ultra-wide line seam matches continuous bitmap reference at non-integer zoom");
+  }
+  // 12. P2 #8: Byte budget rejects oversized 192 DPI atlas cleanly, falls back without retrying every frame, and LRU evicts by bytes.
+  {
+   Fixture f;auto&a=f.a;a.width=280;a.height=80;a.viewportBottom=80;a.textX=10;a.valid=true;a.hasClock=true;a.index=0;
+   Line huge;huge.time=0;huge.duration=10000;
+   double wt=0;
+   for(int i=0;i<500;i++){huge.text+=L"Word1234";huge.words.push_back({L"Word1234",wt,10});wt+=10;}
+   a.lines={huge};auto&row=a.group(0);row.y.snap(20);row.zoom.snap(1.f);row.active=true;
+   HDC hiDc=CreateCompatibleDC(nullptr);
+   BITMAPINFO hiInfo{};hiInfo.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);hiInfo.bmiHeader.biWidth=Surface::width;hiInfo.bmiHeader.biHeight=-Surface::height;hiInfo.bmiHeader.biPlanes=1;hiInfo.bmiHeader.biBitCount=32;hiInfo.bmiHeader.biCompression=BI_RGB;
+   BYTE* hiPixels=nullptr;HBITMAP hiBmp=CreateDIBSection(hiDc,&hiInfo,DIB_RGB_COLORS,reinterpret_cast<void**>(&hiPixels),nullptr,0);
+   require(hiDc!=nullptr&&hiBmp!=nullptr,"create 192 DPI memory DIB");
+   HGDIOBJ hiOld=SelectObject(hiDc,hiBmp);
+   Com<ID2D1Factory> hiFactory;check(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,hiFactory.put()));
+   Com<ID2D1DCRenderTarget> hiDpi;
+   auto hiProps=D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_SOFTWARE,D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,D2D1_ALPHA_MODE_IGNORE),192.f,192.f);
+   check(hiFactory->CreateDCRenderTarget(&hiProps,hiDpi.put()));
+   RECT hiRect{0,0,Surface::width,Surface::height};check(hiDpi->BindDC(hiDc,&hiRect));
+   hiDpi->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+   Graphics hiG;hiG.init(hiDpi.get(),a.bgA,a.bgB,CoverData(),280.f,80.f);
+   auto drawHi=[&]{hiDpi->BeginDraw();hiDpi->Clear(D2D1::ColorF(D2D1::ColorF::Black));a.drawGroup(hiG,row,0,50);check(hiDpi->EndDraw());GdiFlush();};
+   drawHi();
+   const auto buildsAfterFail=hiG.rowTextureBuilds;
+   require(buildsAfterFail==0&&hiG.rowTextures[row.content->serial].words.failed&&hiG.totalRowTextureBytes==0,"oversized 192 DPI atlas hits byte budget and marks failed");
+   drawHi();
+   require(hiG.rowTextureBuilds==buildsAfterFail,"failed atlas does not retry allocation on every frame");
+   uint64_t hiInk=0;for(size_t i=0;i<size_t(Surface::width)*Surface::height*4;i+=4)hiInk+=hiPixels[i+1];
+   require(hiInk>0,"oversized line falls back to direct text rendering with visible ink");
+   hiG.clear();hiDpi.reset();if(hiOld)SelectObject(hiDc,hiOld);if(hiBmp)DeleteObject(hiBmp);if(hiDc)DeleteDC(hiDc);
+   Fixture lru;auto&la=lru.a;la.valid=true;la.hasClock=true;
+   for(int i=0;i<25;i++){
+    Line rowLine;rowLine.time=i*1000.;rowLine.duration=1000;rowLine.text=L"LRU cache row text sample "+std::to_wstring(i)+L" for byte eviction";
+    la.lines.push_back(rowLine);
+   }
+   Surface lruSurface;lruSurface.g.maxRowTextureBytes=200*1024;
+   for(int i=0;i<25;i++){
+    la.index=i;auto&lr=la.group(i);lr.y.snap(40);lr.zoom.snap(1.f);
+    lruSurface.target->BeginDraw();lruSurface.target->Clear(D2D1::ColorF(D2D1::ColorF::Black));
+    la.drawGroup(lruSurface.g,lr,i,i*1000.);check(lruSurface.target->EndDraw());
+    require(lruSurface.g.totalRowTextureBytes<=lruSurface.g.maxRowTextureBytes,"row texture LRU stays within total byte budget");
+   }
+   require(lruSurface.g.totalRowTextureBytes>0&&lruSurface.g.rowTextures.size()<25,"row texture LRU evicts entries to enforce byte cap");
+  }
+  // 13. P2 #9: Standalone Chinese punctuation does not break long-note tail handoff.
+  {
+   Fixture f;auto&a=f.a;a.valid=true;a.playing=true;
+   Line l0,l1;
+   l0.time=0;l0.duration=2050;l0.text=L"Hold\x3002";
+   l0.words={{L"Hold",0,2000,true,false},{L"\x3002",2000,50,false,false}};
+   l1.time=3600;l1.duration=1000;l1.text=L"Next";l1.words={{L"Next",3600,1000,false,false}};
+   a.lines={l0,l1};a.index=0;a.position=2800;f.layout(0);
+   expectNear(a.longNoteTailGap(a.lines[0],0,0),1600.,"GetStringTypeW fallback ignores standalone Chinese punctuation");
+   require(a.wordGlowIntensity(a.group(0),0,0,2800,a.motionNow())>.12f,"long-note handoff continues across gap despite trailing Chinese punctuation");
+   // Verify JSON lineTail wire marker preserves explicit tail continuity too.
+   Json msg=Json::obj();msg["type"]="lyrics";msg["songId"]="";msg["lines"].kind=Json::Array;
+   Json jl0=Json::obj(),jw0=Json::obj(),jw1=Json::obj(),jl1=Json::obj();
+   jw0["text"]="Hold";jw0["time"]=0;jw0["duration"]=2000;jw0["longNote"]=true;jw0["lineTail"]=true;
+   jw1["text"]="\xe3\x80\x82";jw1["time"]=2000;jw1["duration"]=50;
+   jl0["time"]=0;jl0["duration"]=2050;jl0["words"].kind=Json::Array;jl0["words"].array={jw0,jw1};
+   jl1["time"]=3600;jl1["duration"]=1000;jl1["text"]="Next";
+   msg["lines"].array={jl0,jl1};
+   a.receive(msg);
+   require(a.lines[0].words[0].lineTail&&!a.lines[0].words[1].lineTail,"JSON lyrics bridge preserves lineTail marker");
+   Line punctuation;punctuation.time=2200;punctuation.text=L"\x2026";
+   a.lines.insert(a.lines.begin()+1,punctuation);
+   expectNear(a.longNoteTailGap(a.lines[0],0,0),1600.,"lineTail marker yields 1600ms handoff gap");
+  }
+  // 14. P2 #11: Invalid native style values preserve existing state instead of clamping to new effects.
+  {
+   Fixture f;auto&a=f.a;a.lineCurve=2;a.stagger=false;a.wordMode=0;
+   Json bad=Json::obj();bad["type"]="style";bad["curve"]=99;bad["stagger"]="false";bad["wordMode"]=99;
+   a.receive(bad);
+   require(a.lineCurve==2&&!a.stagger&&a.wordMode==0,"out-of-range and wrong-type native style fields preserve existing settings");
+   bad["curve"]=1.5;bad["wordMode"]=true;
+   a.receive(bad);
+   require(a.lineCurve==2&&a.wordMode==0,"fractional and boolean native style fields are ignored");
+   Json validStyle=Json::obj();validStyle["type"]="style";validStyle["curve"]=4;validStyle["stagger"]=true;validStyle["wordMode"]=1;
+   a.receive(validStyle);
+   bad["curve"]=-1;bad["wordMode"]=-1;bad["stagger"]=Json();
+   a.receive(bad);
+   require(a.lineCurve==4&&a.stagger&&a.wordMode==1,"negative invalid native style fields preserve valid active effects");
+  }
+  // 15. Dual-layer pure-white Gaussian halo bitmap cache: reuse, pure-white color, smooth falloff, and byte accounting.
+  {
+   Fixture f;auto&a=f.a;a.width=360;a.height=160;a.viewportBottom=132;a.textX=40;a.valid=true;a.playing=true;a.index=0;
+   Line l;l.time=0;l.duration=2000;l.text=L"Halo";l.words={{L"Halo",0,2000,true,true,false}};
+   a.lines={l};auto&row=a.group(0);row.y.snap(50);row.zoom.snap(1.f);row.active=true;
+   Surface surface;
+   auto drawHalo=[&](double time){
+    surface.target->BeginDraw();surface.target->Clear(D2D1::ColorF(D2D1::ColorF::Black));
+    a.drawGroupAt(surface.g,row,0,time,a.motionNow(),true);
+    check(surface.target->EndDraw());GdiFlush();
+   };
+   drawHalo(1000);
+   require(surface.g.glowTextureBuilds==1&&surface.g.totalRowTextureBytes>0,"first halo draw builds and tracks cached Gaussian bitmap");
+   const auto&gt=surface.g.rowTextures[row.content->serial].glows[0];
+   require(gt.ready&&gt.bytes>0,"glow texture is marked ready with exact byte budget");
+   const size_t trackedBytes=surface.g.totalRowTextureBytes;
+   int whitePixels=0;bool pureWhite=true;
+   for(int y=0;y<Surface::height;++y)for(int x=0;x<Surface::width;++x){
+    const size_t idx=(y*Surface::width+x)*4;
+    const int b=surface.pixels[idx],g=surface.pixels[idx+1],r=surface.pixels[idx+2];
+    if(b||g||r){++whitePixels;if(std::abs(r-g)>1||std::abs(g-b)>1)pureWhite=false;}
+   }
+   require(whitePixels>50&&pureWhite,"dual-layer Gaussian halo renders pure white without dark background tint");
+   // Verify smooth monotonic outward falloff from the left stroke of 'H' at vertical midline.
+   const int midY=int(50.f+row.content->mainHeight*.55f),leftEdge=int(a.textX);
+   const int innerVal=surface.pixels[(midY*Surface::width+leftEdge)*4+1];
+   const int outerMid=surface.pixels[(midY*Surface::width+(leftEdge-3))*4+1];
+   const int outerFar=surface.pixels[(midY*Surface::width+(leftEdge-6))*4+1];
+   require(innerVal>outerMid&&outerMid>outerFar&&outerFar>0,"Gaussian halo falls off smoothly without discrete rings");
+   drawHalo(1200);
+   require(surface.g.glowTextureBuilds==1&&surface.g.totalRowTextureBytes==trackedBytes,"subsequent halo draws reuse cached Gaussian bitmap");
+   surface.g.clearRowTextures();
+   require(surface.g.totalRowTextureBytes==0&&surface.g.rowTextures.empty(),"clearRowTextures releases cached Gaussian halo bytes");
+  }
+  // 16. CJK short-tail (500ms) tiered glow + 35% fast attack + <4s tail handoff.
+  {
+   Fixture f;auto&a=f.a;a.valid=true;a.playing=true;
+   Line l0,l1;
+   l0.time=0;l0.duration=500;l0.text=L"风";l0.words={{L"风",0,500,true,true,false}};
+   l1.time=2500;l1.duration=1000;l1.text=L"Next";l1.words={{L"Next",2500,1000,false,false,false}};
+   a.lines={l0,l1};a.index=0;a.position=175;f.layout(0);
+   const float shortPeak=a.wordGlowIntensity(a.group(0),0,0,175,a.motionNow());
+   expectNear(shortPeak,longNoteStrength(500),"500ms CJK short tail reaches tiered peak by 35%");
+   require(shortPeak>.35f&&shortPeak<.5f,"500ms short tail peaks gentler than >=1s full glow");
+   expectNear(a.wordGlowIntensity(a.group(0),0,0,2500,a.motionNow()),shortPeak*LongNoteTailEmber,"500ms CJK tail hands off to scaled ember at next vocal");
+   require(a.wordGlowIntensity(a.group(0),0,0,2750,a.motionNow())==0.f,"500ms tail handoff releases after 250ms");
+  }
+  // 17. Widened sweep feather on glowing words (wordMode=1) while keeping zero-flash deactivation.
+  {
+   Fixture f;auto&a=f.a;a.width=360;a.height=160;a.viewportBottom=132;a.textX=20;a.valid=true;a.hasClock=true;a.playing=true;a.wordMode=1;
+   Line lPlain,lGlow;
+   lPlain.time=0;lPlain.duration=900;lPlain.text=L"Sweeping";lPlain.words={{L"Sweeping",0,900,false,false,false}};
+   lGlow.time=0;lGlow.duration=900;lGlow.text=L"Sweeping";lGlow.words={{L"Sweeping",0,900,true,true,false}};
+   Surface sPlain,sGlow;
+   a.lines={lPlain};a.index=0;f.layout(0);a.group(0).y.snap(40);a.group(0).zoom.snap(1.f);a.group(0).active=true;
+   sPlain.target->BeginDraw();sPlain.target->Clear(D2D1::ColorF(D2D1::ColorF::Black));a.drawGroupAt(sPlain.g,a.group(0),0,450,a.motionNow(),false);check(sPlain.target->EndDraw());GdiFlush();
+   a.lines={lGlow};a.groups.clear();a.lyricLayouts.clear();a.focusIndex=-999;a.index=0;f.layout(0);a.group(0).y.snap(40);a.group(0).zoom.snap(1.f);a.group(0).active=true;
+   sGlow.target->BeginDraw();sGlow.target->Clear(D2D1::ColorF(D2D1::ColorF::Black));a.drawGroupAt(sGlow.g,a.group(0),0,450,a.motionNow(),false);check(sGlow.target->EndDraw());GdiFlush();
+   const bool sweepDiff=!std::equal(sPlain.pixels,sPlain.pixels+Surface::width*Surface::height*4,sGlow.pixels);
+   require(sweepDiff,"glowing word widens the sweep gradient feather transition");
+   a.index=1;a.lines.push_back({L"Next",L"",900,1000,{},false});
+   sGlow.target->BeginDraw();sGlow.target->Clear(D2D1::ColorF(D2D1::ColorF::Black));a.drawGroupAt(sGlow.g,a.group(0),0,450,a.motionNow(),false);check(sGlow.target->EndDraw());GdiFlush();
+   const auto beforeCut=std::vector<BYTE>(sGlow.pixels,sGlow.pixels+Surface::width*Surface::height*4);
+   a.position=450;a.roles();a.group(0).mainAlpha.snap(1.f);
+   sGlow.target->BeginDraw();sGlow.target->Clear(D2D1::ColorF(D2D1::ColorF::Black));a.drawGroupAt(sGlow.g,a.group(0),0,450,a.motionNow(),false);check(sGlow.target->EndDraw());GdiFlush();
+   unsigned cutDiff=0;
+   for(size_t i=0;i<beforeCut.size();i+=4)cutDiff=std::max<unsigned>(cutDiff,std::abs(int(beforeCut[i+1])-int(sGlow.pixels[i+1])));
+   require(cutDiff<=1,"widened-feather deactivation keeps smooth first frame without jump");
+  }
+  // 18. Whole-word emphasis swell on mid-line >=1s words, rendered enlargement, smooth release, and bell glow.
+  {
+   Fixture f;auto&a=f.a;a.width=360;a.height=160;a.viewportBottom=132;a.textX=30;a.valid=true;a.hasClock=true;a.playing=true;
+   Line lPlain,l0,l1;
+   lPlain.time=0;lPlain.duration=2500;lPlain.text=L"Hello";lPlain.words={{L"Hello",0,2000,false,false,false}};
+   l0.time=0;l0.duration=2500;l0.text=L"Hello";l0.words={{L"Hello",0,2000,false,false,true}};
+   l1.time=2500;l1.duration=1000;l1.text=L"Next";l1.words={{L"Next",2500,1000,false,false,false}};
+   Surface surface;
+   auto measureForeground=[&](const LyricGroup&g){
+    surface.target->BeginDraw();surface.target->Clear(D2D1::ColorF(D2D1::ColorF::Black));
+    a.drawGroupAt(surface.g,g,0,1000,a.motionNow(),false);check(surface.target->EndDraw());GdiFlush();
+    int minY=Surface::height,maxY=-1,minX=Surface::width,maxX=-1;
+    for(int y=0;y<Surface::height;++y)for(int x=0;x<Surface::width;++x){
+     const size_t idx=(y*Surface::width+x)*4;
+     if(surface.pixels[idx+1]>8){minY=std::min(minY,y);maxY=std::max(maxY,y);minX=std::min(minX,x);maxX=std::max(maxX,x);}
+    }
+    return std::make_pair(maxX-minX,maxY-minY);
+   };
+   a.lines={lPlain,l1};a.index=0;a.position=1000;a.freezePlayback=true;f.layout(0);
+   a.group(0).y.snap(40);a.group(0).zoom.snap(1.f);a.group(0).active=true;
+   const auto plainBounds=measureForeground(a.group(0));
+   a.groups.clear();a.lyricLayouts.clear();a.focusIndex=-999;
+   a.lines={l0,l1};a.index=0;a.position=1000;a.freezePlayback=true;f.layout(0);
+   auto&row=a.group(0);row.y.snap(40);row.zoom.snap(1.f);row.active=true;
+   expectNear(a.wordEmphasisScale(row,0,0,a.motionNow()),1.f,"emphasis swell starts at 1.0x");
+   const float midScale=a.wordEmphasisScale(row,0,1000,a.motionNow());
+   require(midScale>1.03f&&midScale<=1.08f,"emphasized word swells cleanly at midpoint");
+   expectNear(a.wordEmphasisScale(row,0,2000,a.motionNow()),1.f,"emphasis swell returns to 1.0x at word end");
+   require(a.wordGlowIntensity(row,0,0,1000,a.motionNow())>.35f,"mid-line emphasized word emits bell glow without requiring longNote");
+   require(a.wordGlowIntensity(row,0,0,2000,a.motionNow())==0.f,"mid-line emphasis glow returns to 0 at word end");
+   const auto emphBounds=measureForeground(row);
+   require(emphBounds.first>=plainBounds.first&&emphBounds.second>=plainBounds.second&&(emphBounds.first>plainBounds.first||emphBounds.second>plainBounds.second),"emphasized midpoint visibly expands foreground bounds");
+   surface.target->BeginDraw();surface.target->Clear(D2D1::ColorF(D2D1::ColorF::Black));
+   a.drawGroupAt(surface.g,row,0,1000,a.motionNow(),true);check(surface.target->EndDraw());GdiFlush();
+   size_t haloPixels=0;
+   for(int y=0;y<Surface::height;++y)for(int x=0;x<Surface::width;++x){
+    const size_t idx=(y*Surface::width+x)*4;
+    if(surface.pixels[idx+1]>0){
+     require(surface.pixels[idx]==surface.pixels[idx+1]&&surface.pixels[idx+1]==surface.pixels[idx+2],"mid-line emphasis halo is pure white");
+     ++haloPixels;
+    }
+   }
+   require(haloPixels>0,"mid-line emphasized word renders pure-white halo without longNote");
+   a.position=1000;a.index=1;a.roles();
+   const float releaseStart=a.wordEmphasisScale(row,0,1000,a.motionNow());
+   expectNear(releaseStart,midScale,"early line switch captures current emphasis scale");
+   const float releaseMid=a.wordEmphasisScale(row,0,1000,a.motionNow()+100);
+   require(releaseMid<releaseStart&&releaseMid>1.f,"deactivated line smoothly relaxes emphasis scale toward 1.0x");
+   expectNear(a.wordEmphasisScale(row,0,1000,a.motionNow()+200),1.f,"emphasis scale returns to 1.0x after 200ms release");
+   require(a.wordGlowIntensity(row,0,0,1000,a.motionNow()+100)>0.f&&a.wordGlowIntensity(row,0,0,1000,a.motionNow()+200)==0.f,
+           "emphasis-only glow settles together with scale, even after a late cutoff");
+  }
+  std::cout<<"PASS: row texture reuse/continuity, word gradient sweep, spring velocity, tail handoff, Gaussian glow, swell and all review fixes\n";
+ }
+ static void effects091(){
+  {
+   Fixture f;auto&a=f.a;Line first,next;first.text=L"Hold";first.duration=1000;
+   first.words={{L"Hold",0,1000,true,true,false}};
+   next.time=1050;next.text=L"Next";next.words={{L"Next",1050,500,false}};
+   a.lines={first,next};a.valid=a.playing=true;a.index=0;a.position=1049;f.layout(0);
+   a.position=1050;a.update();const double now=a.motionNow();
+   require(a.index==1&&a.wordGlowIntensity(a.group(1),1,0,1050,now)==0.f,
+           "next line takes over on time without inheriting the previous glow");
+   expectNear(a.wordGlowIntensity(a.group(0),0,0,1050,now),.9f,"previous line continues fading after the 50ms gap");
+   require(a.wordGlowIntensity(a.group(0),0,0,1500,now)==0.f,"short-gap glow is gone by the normal fade deadline");
+  }
+  {
+   Fixture f;auto&a=f.a;Line line;line.text=L"First Second";
+   line.words={{L"First ",0,2000,false,false,true},{L"Second",2000,2000,false,false,true}};
+   a.lines={line};const auto&row=a.group(0);Surface surface;surface.target->SetDpi(192,192);
+   auto&g=surface.g;const auto*first=g.acquireGlowTexture(*row.content,0,CurrentFontSize);
+   require(first&&first->ready&&first->bytes>0,"first word fits in the test cache");
+   const auto used=first->bytes;g.maxRowTextureBytes=used+1;
+   const auto*second=g.acquireGlowTexture(*row.content,1,CurrentFontSize);
+   require(second&&second->failed&&!second->ready&&g.totalRowTextureBytes==used,
+           "adding a second glow to the protected row cannot bypass the byte cap");
+  }
+  {
+   Fixture f;auto&a=f.a;Line line,next;line.text=std::wstring(90,L'W')+L"Glow";line.duration=2000;
+   line.words={{std::wstring(90,L'W'),0,200,false},{L"Glow",200,1200,true,true,false}};
+   next.time=5000;next.text=L"Next";a.lines={line,next};a.playing=a.valid=true;a.index=0;a.position=3000;
+   a.fps=60;a.textX=20;a.width=280;f.layout(0,0);
+   auto&row=a.group(0);row.y.snap(55);row.zoom.snap(1.f);
+   require(a.groupVisible(row,a.motionNow()),"long lyric row remains visible while its tail is horizontally offscreen");
+   expectNear(f.interval(3000),200,"offscreen glow does not hold 60 FPS while browsing");
+   Surface surface;surface.target->BeginDraw();a.drawGroupAt(surface.g,row,0,3000,a.motionNow(),true);check(surface.target->EndDraw());
+   require(surface.g.glowTextureBuilds==0,"offscreen tail is culled before allocating its glow texture");
+  }
+  {
+   Fixture f;auto&a=f.a;Line line;line.text=L"Wide";line.words={{L"Wide",0,2000,false,false,true}};
+   a.lines={line};a.valid=a.hasClock=a.playing=true;a.index=0;a.textX=30;a.width=500;
+   auto&row=a.group(0);row.y.snap(40);row.zoom.snap(1.f);
+   Surface surface;surface.g.maxAtlasBytes=1;
+   surface.target->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+   auto drawWord=[&](int mode){
+    a.wordMode=mode;surface.target->BeginDraw();surface.target->Clear(D2D1::ColorF(D2D1::ColorF::Black));
+    a.drawGroupAt(surface.g,row,0,1000,a.motionNow());check(surface.target->EndDraw());GdiFlush();
+    return std::vector<BYTE>(surface.pixels,surface.pixels+Surface::width*Surface::height*4);
+   };
+   const auto fade=drawWord(0),sweep=drawWord(1);
+   require(surface.g.rowTextures.at(row.content->serial).words.failed&&fade!=sweep,"direct fallback retains the sweep gradient");
+   auto rightInk=[](const auto&pixels){
+    int right=-1;
+    for(int y=0;y<Surface::height;++y)for(int x=0;x<Surface::width;++x)if(pixels[(y*Surface::width+x)*4+1]>24)right=std::max(right,x);
+    return right;
+   };
+   a.lines[0].words[0].emphasize=false;a.group(0);
+   require(rightInk(fade)>rightInk(drawWord(0)),"direct fallback retains foreground swell as well as the glow placement");
+  }
+  {
+   Fixture f;auto&a=f.a;a.currentFontSize=36.f;a.makeFormat(a.mainFormat,36.f,DWRITE_FONT_WEIGHT_SEMI_BOLD);
+   Line line;line.text=L"WWWWWWWWM";line.words={{L"WWWWWWW",0,4000,false,false,true},{L"WM",4000,1000,false}};
+   a.lines={line};a.index=0;auto&row=a.group(0);
+   const auto&left=row.content->glyphs[0];const auto&right=row.content->glyphs[1];
+   const float center=left.layout.width*.5f,scale=a.wordEmphasisScale(row,0,2000,a.motionNow());
+   require(scale<1.075f&&left.x+center+(left.inkRight-center)*scale<=right.x+right.inkLeft+.01f,
+           "swell leaves room for the next word's ink without moving its advance");
+  }
+  std::cout<<"PASS: bounded glow cache, screen culling, direct sweep and swell, and adjacent word spacing\n";
+ }
+ static void focusedEffects(){modernEffects();effects091();std::cout<<"PASS: "<<checks<<" focused native effect checks\n";}
  static void run(const std::filesystem::path&directory,bool includeGpu=true){
   lyricStates();browseBoundary();startupPreview();typography();motionGeometry();scheduling();pixels(directory);interludes(directory);browseInterludes(directory);seekFlights(directory);
+  modernEffects();
+  effects091();
   if(includeGpu)backgrounds(directory);
   pausedBrowse();viewportRows();fontSizes(directory);cleanup(directory);preludeRows(directory);
   if(includeGpu)movingFrames(directory);
@@ -782,4 +1484,4 @@ struct NativeTest {
  }
 };
 int NativeTest::checks=0;
-int main(int argc,char**argv){try{auto directory=argc>1?std::filesystem::path(argv[1]):std::filesystem::path();if(argc>2&&std::strcmp(argv[2],"paused-browse")==0)NativeTest::pausedBrowse();else if(argc>2&&std::strcmp(argv[2],"viewport")==0)NativeTest::viewportRows();else if(argc>2&&std::strcmp(argv[2],"lyric-state")==0)NativeTest::lyricStates();else if(argc>2&&std::strcmp(argv[2],"startup")==0)NativeTest::startupPreview();else if(argc>2&&std::strcmp(argv[2],"browse")==0)NativeTest::browseBoundary();else if(argc>2&&std::strcmp(argv[2],"font")==0)NativeTest::fontSizes(directory);else if(argc>2&&std::strcmp(argv[2],"flight")==0)NativeTest::seekFlights(directory);else if(argc>2&&std::strcmp(argv[2],"cleanup")==0)NativeTest::cleanup(directory);else if(argc>2&&std::strcmp(argv[2],"prelude")==0){NativeTest::startupPreview();NativeTest::preludeRows(directory);NativeTest::interludes(directory);}else if(argc>2&&std::strcmp(argv[2],"moving")==0)NativeTest::movingFrames(directory);else if(argc>2&&std::strcmp(argv[2],"words")==0)NativeTest::wordScrolling(directory);else if(argc>2&&std::strcmp(argv[2],"resize")==0)NativeTest::resizeRendering(directory);else if(argc>2&&std::strcmp(argv[2],"background")==0){NativeTest::backgrounds(directory);std::cout<<"PASS: "<<NativeTest::checks<<" focused background checks\n";}else if(argc>2&&std::strcmp(argv[2],"optimization")==0){NativeTest::optimizations(directory);NativeTest::seekFlights(directory);std::cout<<"PASS: "<<NativeTest::checks<<" focused optimization checks\n";}else if(argc>2&&std::strcmp(argv[2],"regressions")==0)NativeTest::regressions(directory,true);else if(argc>2&&std::strcmp(argv[2],"ci")==0)NativeTest::run(directory,false);else NativeTest::run(directory,true);return 0;}catch(const std::exception&e){std::cerr<<"FAIL: "<<e.what()<<"\n";return 1;}}
+int main(int argc,char**argv){try{auto directory=argc>1?std::filesystem::path(argv[1]):std::filesystem::path();if(argc>2&&std::strcmp(argv[2],"effects")==0)NativeTest::focusedEffects();else if(argc>2&&std::strcmp(argv[2],"paused-browse")==0)NativeTest::pausedBrowse();else if(argc>2&&std::strcmp(argv[2],"viewport")==0)NativeTest::viewportRows();else if(argc>2&&std::strcmp(argv[2],"lyric-state")==0)NativeTest::lyricStates();else if(argc>2&&std::strcmp(argv[2],"startup")==0)NativeTest::startupPreview();else if(argc>2&&std::strcmp(argv[2],"browse")==0)NativeTest::browseBoundary();else if(argc>2&&std::strcmp(argv[2],"font")==0)NativeTest::fontSizes(directory);else if(argc>2&&std::strcmp(argv[2],"flight")==0)NativeTest::seekFlights(directory);else if(argc>2&&std::strcmp(argv[2],"cleanup")==0)NativeTest::cleanup(directory);else if(argc>2&&std::strcmp(argv[2],"prelude")==0){NativeTest::startupPreview();NativeTest::preludeRows(directory);NativeTest::interludes(directory);}else if(argc>2&&std::strcmp(argv[2],"moving")==0)NativeTest::movingFrames(directory);else if(argc>2&&std::strcmp(argv[2],"words")==0)NativeTest::wordScrolling(directory);else if(argc>2&&std::strcmp(argv[2],"resize")==0)NativeTest::resizeRendering(directory);else if(argc>2&&std::strcmp(argv[2],"background")==0){NativeTest::backgrounds(directory);std::cout<<"PASS: "<<NativeTest::checks<<" focused background checks\n";}else if(argc>2&&std::strcmp(argv[2],"optimization")==0){NativeTest::optimizations(directory);NativeTest::seekFlights(directory);std::cout<<"PASS: "<<NativeTest::checks<<" focused optimization checks\n";}else if(argc>2&&std::strcmp(argv[2],"regressions")==0)NativeTest::regressions(directory,true);else if(argc>2&&std::strcmp(argv[2],"ci")==0)NativeTest::run(directory,false);else NativeTest::run(directory,true);return 0;}catch(const std::exception&e){std::cerr<<"FAIL: "<<e.what()<<"\n";return 1;}}

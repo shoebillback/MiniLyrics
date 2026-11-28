@@ -33,10 +33,7 @@ if($CI){
 }
 
 if($IncludeHarness){
- Write-Output '=== Interactive host harness suites ==='
- foreach($script in @('browse.ps1','layout.ps1','motion.ps1','resize.ps1','direct2d.ps1')){
-  Write-Output "--- $script ---"
-  & (Join-Path $testsRoot $script)
-  if($LASTEXITCODE -ne 0){throw "Harness failed for $script"}
- }
+ Write-Output '=== Interactive host harness suite ==='
+ & (Join-Path $testsRoot 'direct2d.ps1')
+ if($LASTEXITCODE -ne 0){throw 'Harness failed for direct2d.ps1'}
 }

@@ -24,7 +24,7 @@ test('control flow bundle: toggle uses the original state and loaded paused seek
 test('control flow bundle: close cancels a startup follow-up before delayed initialization finishes',async()=>{
  const f=fixture({actualPlayer:true,coldPlayer:true,deferStartup:true});try{
   await f.open();f.seek(50000);assert.equal(f.diagnostics().seekPending,true);assert.deepEqual(f.seeks,[]);
-  f.config().children.find(c=>c.textContent==='关闭小窗').onclick();f.completeNativeStartup();await Promise.resolve();
+  f.configControl('miniLyrics-close').onclick();f.completeNativeStartup();await Promise.resolve();
   assert.deepEqual(f.seeks,[50000],'only the original queued startup position is applied; no later MiniLyrics seek');
  }finally{f.dispose();}
 });

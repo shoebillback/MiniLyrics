@@ -26,7 +26,7 @@ test('fresh player can seek from the widget before original playback starts',asy
   f.advance(1000);emit('Seek','local-a','seek',0,50);emit('PlayState','local-a','play',1);
   assert.equal(f.diagnostics().seekPending,false);assert.equal(f.diagnostics().positionMs,50000);
   emit('PlayProgress','local-a',51);assert.equal(f.diagnostics().positionMs,51000);assert.equal(f.diagnostics().valid,true);
-  f.config().children.find(c=>c.textContent==='关闭小窗').onclick();
+  f.configControl('miniLyrics-close').onclick();
   await f.open();emit('PlayProgress','local-a',52);assert.equal(f.diagnostics().positionMs,52000);
   assert.equal(f.nativeInitializations(),1);
  }finally{f.dispose();}
@@ -65,7 +65,7 @@ test('restored position cannot confirm a pending seek; equal actual progress can
 
 test('settings distinguish initialization, filtered progress and a stalled stream',async()=>{
  const f=fixture({actualPlayer:true,coldPlayer:true});try{
-  await f.open();const status=f.config().children.at(-1);assert.match(status.textContent,/等待播放器初始化/);
+  await f.open();const status=f.configControl('miniLyrics-status');assert.match(status.textContent,/等待播放器初始化/);
   f.seek(50000);f.advance(1000);assert.match(status.textContent,/等待实际播放进度/);
   emitNative(f,'PlayProgress','old-song',50);f.advance(1000);assert.match(status.textContent,/收到进度但未接受/);
   emitNative(f,'PlayState','local-a','play',1);emitNative(f,'PlayProgress','local-a',51);assert.match(status.textContent,/进度正常/);
@@ -79,5 +79,40 @@ test('superseding external native Seek during cold-start startup clears seekPend
   emitNative(f,'Seek','local-a','external-seek',0,15);
   assert.equal(f.diagnostics().seekPending,false);
   assert.equal(f.diagnostics().positionMs,15000);
+ }finally{f.dispose();}
+});
+test('new native progress at the exact stalled position recovers the clock',async()=>{
+ const f=fixture({actualPlayer:true});try{
+  await f.open();
+  emitNative(f,'PlayProgress','local-a',10);
+  assert.equal(f.diagnostics().valid,true);assert.equal(f.diagnostics().positionMs,10000);
+  f.advance(5000);
+  assert.equal(f.diagnostics().valid,false);
+  emitNative(f,'PlayProgress','local-a',10);
+  assert.equal(f.diagnostics().valid,true);assert.equal(f.diagnostics().positionMs,10000);
+ }finally{f.dispose();}
+});
+test('late acknowledgement from a replaced seek does not confirm or cancel the newer seek',async()=>{
+ const f=fixture({actualPlayer:true});try{
+  await f.open();
+  f.seek(30000,1);f.seek(45000,2);
+  emitNative(f,'Seek','local-a','s1',0,30);
+  assert.equal(f.diagnostics().seekPending,true);
+  assert.equal(f.diagnostics().positionMs,30000);
+  let lastClock=f.sent.filter(m=>m.type==='clock').at(-1);
+  assert.equal(lastClock.seekRequest,2);assert.equal(lastClock.seekState,'pending');
+  emitNative(f,'Seek','local-a','s2',0,45);
+  assert.equal(f.diagnostics().seekPending,false);
+  assert.equal(f.diagnostics().positionMs,45000);
+  lastClock=f.sent.filter(m=>m.type==='clock').at(-1);
+  assert.equal(lastClock.seekRequest,2);assert.equal(lastClock.seekState,'confirmed');
+
+  f.seek(30000,3);f.seek(45000,4);
+  emitNative(f,'Seek','local-a','s3',0,30);
+  assert.equal(f.diagnostics().seekPending,true);
+  f.advance(2600);
+  assert.equal(f.diagnostics().seekPending,false);
+  lastClock=f.sent.filter(m=>m.type==='clock').at(-1);
+  assert.equal(lastClock.seekRequest,4);assert.equal(lastClock.seekState,'failed');
  }finally{f.dispose();}
 });

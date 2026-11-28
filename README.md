@@ -1,6 +1,6 @@
 # MiniLyrics
 
-基于 BetterNCM 与 RefinedNowPlayingNext 的 Windows 原生桌面歌词小窗。当前版本 **0.8.3**。
+基于 BetterNCM 的 Windows 原生桌面歌词小窗。当前版本 **0.9.1**。
 
 ## 功能
 
@@ -12,13 +12,15 @@
 
 ## 安装
 
-需要 Windows 10/11 x64、网易云音乐 3.1.11+、BetterNCM ≥ 1.0.0 和 RefinedNowPlayingNext。无需另装 .NET、Node.js 或 WebView2。
+需要 Windows 10/11 x64、网易云音乐 3.x（最低 3.1.11）和 BetterNCM ≥ 1.0.0。无需安装其他插件或额外运行时。
 
 1. 从 [dist](dist/) 下载对应版本的 `.plugin` 安装包。
 2. 完全退出网易云音乐和旧 MiniLyrics 小窗，将安装包放入 BetterNCM 数据目录的 `plugins` 文件夹，替换旧包。
-3. 重启网易云，在 MiniLyrics 设置中点击“打开 / 找回小窗”。
+3. 重启网易云，点击底部播放栏右侧、音量与「更多」之间的 MiniLyrics 图标，即可打开或关闭小窗。
 
 升级时请替换完整安装包。开启鼠标穿透后，可在设置页点击“退出鼠标穿透”恢复操作。
+
+MiniLyrics 直接从网易云获取在线歌曲和云盘歌曲的歌词，优先显示逐字歌词与翻译。设置页可调整歌词偏移、换行动画和错峰滚动。本地文件和播客的歌词来源暂未接入。
 
 ## 构建
 
@@ -28,7 +30,7 @@ Windows 下安装 MinGW-w64 g++（支持 Direct3D 11 / Direct2D）和 PowerShell
 powershell -NoProfile -File .\build.ps1
 ```
 
-安装包输出至 `dist/`，附带完整源码及许可证。JavaScript 源码位于 `core.js`、`player.js`、`plugin.js`，原生窗口与绘制源码位于 `native/`。
+安装包输出至 `dist/`，附带完整源码及许可证。JavaScript 源码位于 `core.js`、`player.js`、`lyrics.js` 和 `plugin.js`，原生窗口与绘制源码位于 `native/`。
 
 `main` 保存源码；`plugin-release` 由 GitHub Actions 的 `Build MiniLyrics` 手动发布任务（勾选 `publish`）生成商店运行文件。
 

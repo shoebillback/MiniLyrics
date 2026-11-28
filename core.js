@@ -2,6 +2,7 @@
 (function (root) {
   'use strict';
   const finite = (x, fallback = 0) => Number.isFinite(Number(x)) ? Number(x) : fallback;
+  const validId = value => /^[1-9]\d*$/.test(String(value ?? '')) ? String(value) : '';
   const wellFormed = value => {
     const s = String(value);
     return typeof s.toWellFormed === 'function'
@@ -11,15 +12,18 @@
   function normalizeLines(input, options = {}) {
     if (!Array.isArray(input)) return [];
     const lines = input.slice(0, 5000).filter(l => l && typeof l==='object').map(l => {
-      const time = Math.max(0, finite(l.time ?? l.startTime ?? l.start));
-      let text = wellFormed(l.originalLyric ?? l.lyric ?? l.text ?? l.content ?? '');
-      const words = (Array.isArray(l.dynamicLyric) ? l.dynamicLyric : []).slice(0, 500).filter(w => w && typeof w==='object').map(w => {
-        const t = finite(w.time);
-        return {text: wellFormed(w.word ?? w.text ?? ''), time: options.wordTiming === 'relative' ? time + t : t,
-          duration: Math.max(1, finite(w.duration, 1))};
-      });
+      const time = Math.max(0, finite(l.time));
+      let text = wellFormed(l.text ?? '');
+      const words = (Array.isArray(l.words) ? l.words : []).slice(0, 500).filter(w => w && typeof w==='object').map(w => ({
+        text: wellFormed(w.text ?? ''),
+        time: finite(w.time),
+        duration: Math.max(1, finite(w.duration, 1)),
+        ...(w.longNote===true?{longNote:true}:{}),
+        ...(w.lineTail===true?{lineTail:true}:{}),
+        ...(w.emphasize===true?{emphasize:true}:{})
+      }));
       if (!text) text = words.map(w => w.text).join('');
-      const translation = wellFormed(l.translatedLyric ?? l.translation ?? '');
+      const translation = wellFormed(l.translation ?? '');
       return {time, duration: Math.max(0, finite(l.duration)), text, isInterlude: !!l.isInterlude || (!text && !translation),
         translation, words};
     });
@@ -27,35 +31,43 @@
   }
   function metadata(info) {
     if(!info || typeof info!=='object') return null;
-    const ncmId=finite(info.ncmId);
-    const id=wellFormed(info.trackId??(ncmId>0?ncmId:''));
+    const ncmId=validId(info.ncmId);
+    const id=wellFormed(info.trackId??ncmId);
     if(!id)return null;
-    return {id,ncmId:ncmId>0?String(ncmId):'',title:wellFormed(info.songName??''),
-      artist:wellFormed(info.authorName??''),cover:wellFormed(info.cover?.url??''),
-      duration:Math.max(0,finite(info.duration))};
+    const lyricUserId=validId(info.lyricUserId);
+    const rawLyricId=info.lyricId===undefined?ncmId:wellFormed(info.lyricId);
+    const lyricId=lyricUserId?(rawLyricId&&rawLyricId!=='0'?rawLyricId:''):validId(rawLyricId);
+    return {
+      id,ncmId,lyricId,lyricUserId,
+      title:wellFormed(info.songName??''),
+      artist:wellFormed(info.authorName??''),
+      cover:wellFormed(info.cover?.url??''),
+      duration:Math.max(0,finite(info.duration))
+    };
   }
   // Reconcile a stale provider pause flag only after sustained, real-time progress.
   // A seek sample cannot establish motion, and every explicit state event starts fresh.
   function createPlaybackState(){
-    let reported=null,output=false,inferred=false,point=null,run=null,lastMotionAt=-Infinity;
+    let reported=null,inferred=false,point=null,run=null,lastMotionAt=-Infinity;
+    const playing=()=>reported===true||inferred;
     const parse=value=>{
       if(value===true||value===false)return value;
       if(value==null)return null;
       const text=String(value).toLowerCase();
       return text==='playing'?true:['paused','stopped','ended'].includes(text)?false:null;
     };
-    function reset(){reported=null;output=false;inferred=false;point=null;run=null;lastMotionAt=-Infinity;}
+    function reset(){reported=null;inferred=false;point=null;run=null;lastMotionAt=-Infinity;}
     function report(value,force=false){
       const next=parse(value);
       if(next!==null&&(force||next!==reported)){
-        reported=next;output=next;inferred=false;point=null;run=null;lastMotionAt=-Infinity;
+        reported=next;inferred=false;point=null;run=null;lastMotionAt=-Infinity;
       }
-      return output;
+      return playing();
     }
     function sample(position,now,status,discontinuous=false){
       report(status);
       const next={position,at:now};
-      if(reported===true){point=next;run=null;output=true;return output;}
+      if(reported===true){point=next;run=null;return true;}
       if(discontinuous){point=next;run=null;}
       else if(!point)point=next;
       else if(position!==point.position){
@@ -71,12 +83,12 @@
         point=next;
       }
       if(inferred&&now-lastMotionAt>=2000){inferred=false;run=null;}
-      output=inferred;return output;
+      return playing();
     }
-    return {sample,event:value=>report(value,true),reset,resetProgress:()=>{point=null;run=null;inferred=false;lastMotionAt=-Infinity;output=reported===true;},
-      current:()=>output,snapshot:()=>({reportedPlaying:reported,playing:output,inferredFromProgress:inferred,
+    return {sample,event:value=>report(value,true),reset,resetProgress:()=>{point=null;run=null;inferred=false;lastMotionAt=-Infinity;},
+      current:playing,snapshot:()=>({reportedPlaying:reported,playing:playing(),inferredFromProgress:inferred,
         progressSamples:run?.steps??0})};
   }
-  const api={finite, wellFormed, normalizeLines, metadata, createPlaybackState};
+  const api={finite, validId, wellFormed, normalizeLines, metadata, createPlaybackState};
   if(typeof module!=='undefined') module.exports=api; else root.MiniLyricsCore=api;
 })(typeof window!=='undefined'?window:globalThis);
