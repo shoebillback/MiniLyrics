@@ -37,3 +37,14 @@ test('wellFormed replaces lone UTF-16 surrogates while preserving valid emoji pa
  const meta=C.metadata({trackId:'id\uD83D',songName:'Song 🎵\uDC00',authorName:'A\uD800'});
  assert.equal(meta.id,'id\uFFFD');assert.equal(meta.title,'Song 🎵\uFFFD');assert.equal(meta.artist,'A\uFFFD');
 });
+test('parseLrc reads timestamps, drops metadata tags and expands repeated stamps',()=>{
+ const lines=C.parseLrc('[ti:Title]\n[by:someone]\n[offset:0]\n[00:01.50]First\n[01:02.345][02:03.5]Shared\n[00:03.00]\n');
+ assert.deepEqual(lines.map(l=>[l.time,l.text]),[[1500,'First'],[62345,'Shared'],[123500,'Shared']]);
+});
+test('mergeLyrics aligns translations by timestamp and tolerates missing ones',()=>{
+ const merged=C.mergeLyrics('[00:01.00]Hello\n[00:05.00]World','[00:01.00]你好\n[00:20.00]无用');
+ assert.deepEqual(merged,[{time:1000,text:'Hello',translation:'你好'},{time:5000,text:'World',translation:''}]);
+ assert.deepEqual(C.mergeLyrics('','[00:01.00]仅翻译'),[]);
+ const normalized=C.normalizeLines(merged);
+ assert.equal(normalized[0].translation,'你好');assert.equal(normalized.length,2);
+});

@@ -3,7 +3,7 @@
   'use strict';
   function createPlayerAdapter(env=root){
     let store=null,bridge=null,nativeAdapter=null,unsubscribe=null,disposed=false,starting=false,retry=null,webpackRequire=null;
-    let song=null,status='Paused',timeline=null,sequence=0,lastStoreState=null;
+    let song=null,status='Paused',timeline=null,sequence=0,lastStoreState=null,lastVinylOpen=null,lastLiked=null,vinylEventsBound=false;
     const events=new Map(),bindings=new Map(),eventNames=['PlayProgress','Seek','PlayState'];
     const now=()=>env.performance?.now?.()??Date.now();
     let lastAcceptedProgressAt=null,lastAcceptedSeekAt=null,bridgeSource=null;
@@ -54,7 +54,7 @@
       return {canControl,bridgeSource,originalInitialization:'unverified',subscriptions,streamState,
         hasActualProgress:lastAcceptedProgressAt!==null,lastReceivedProgressAt:progress.lastReceivedAt,lastAcceptedProgressAt,lastAcceptedSeekAt,
         progressAgeMs:lastAcceptedProgressAt===null?null:Math.max(0,now()-lastAcceptedProgressAt),
-        timelineSource:timeline?.source??null,control:controlState(),events:Object.fromEntries(eventNames.map(name=>[name,{...nativeStats[name]}]))};
+        timelineSource:timeline?.source??null,vinylOpen:vinylPageOpen(),liked:currentLiked(),control:controlState(),events:Object.fromEntries(eventNames.map(name=>[name,{...nativeStats[name]}]))};
     }
     const emit=(name,detail)=>{for(const fn of [...events.get(name)??[]])try{fn({detail});}catch(e){env.console?.warn('[MiniLyrics] 播放订阅处理失败',e);}};
     const sameSong=(a,b)=>!!a&&!!b&&a.trackId===b.trackId&&a.ncmId===b.ncmId&&a.songName===b.songName&&a.authorName===b.authorName&&a.cover?.url===b.cover?.url&&a.duration===b.duration;
@@ -73,6 +73,8 @@
     function sync(){
       if(disposed||!store)return;
       bindEvents();
+      const vinylOpen=vinylPageOpen();
+      if(vinylOpen!==lastVinylOpen){lastVinylOpen=vinylOpen;emit('vinylPageChange',{open:vinylOpen});}
       const next=readSong();if(!next)return;
       const changed=next.trackId!==song?.trackId,meta=!sameSong(next,song);
       if(changed){timeline=null;sequence++;lastStoreState=null;lastAcceptedProgressAt=null;lastAcceptedSeekAt=null;cancelSeek(null,true);}
@@ -84,9 +86,115 @@
       if(stateChanged){status=nextStatus;lastStoreState=state;}
       if(timeline)timeline={...timeline,totalTime:song.duration};
       if(meta)emit('songChange',song);
+      if(changed)lastLiked=null;
+      const liked=currentLiked();
+      if(liked!==lastLiked){lastLiked=liked;emit('likeChange',{liked});}
       if(stateChanged)emit('playStateChange',status);
       if(sessionReady(store.getState()?.playing))resumeTrack=null;
       scheduleStartupSeek();
+    }
+    function onVinylEvent(){
+      if(disposed)return;
+      const open=vinylPageOpen();
+      if(open!==lastVinylOpen){lastVinylOpen=open;emit('vinylPageChange',{open});}
+    }
+    function bindVinylEvents(){
+      if(vinylEventsBound||typeof env.addEventListener!=='function')return;
+      vinylEventsBound=true;
+      env.addEventListener('rnp-lyric-page-opened',onVinylEvent);
+      env.addEventListener('rnp-lyric-page-closed',onVinylEvent);
+    }
+    function unbindVinylEvents(){
+      if(!vinylEventsBound)return;
+      vinylEventsBound=false;
+      try{env.removeEventListener?.('rnp-lyric-page-opened',onVinylEvent);env.removeEventListener?.('rnp-lyric-page-closed',onVinylEvent);}catch{}
+    }
+    function vinylPageOpen(){
+      if(disposed)return false;
+      try{
+        // RefinedNowPlayingNext paints its own page over the app and marks body
+        // with this class; the original vinyl page is tracked by redux instead.
+        if(env.document?.body?.classList?.contains('rnp-lyric-page-open'))return true;
+        return !!store&&store.getState()?.['page:vinylPage']?.pageState==='opened';
+      }catch{return false;}
+    }
+    function clickPlayBarCover(){
+      const doc=env.document;
+      if(!doc?.querySelector||typeof env.MouseEvent!=='function')return false;
+      let cover=null;
+      try{cover=doc.querySelector('.miniVinylWrapper')||doc.querySelector('[data-testid="tid_btn_pc_minibar_vinyl"]');}catch{}
+      if(!cover||typeof cover.dispatchEvent!=='function')return false;
+      let box={left:0,top:0,width:0,height:0};
+      try{box=cover.getBoundingClientRect?.()??box;}catch{}
+      try{
+        // A real bubbling click goes through RefinedNowPlayingNext's capture
+        // listeners (optimized page) or the app's own handler (original page).
+        cover.dispatchEvent(new env.MouseEvent('click',{bubbles:true,cancelable:true,composed:true,view:env,button:0,
+          clientX:box.left+box.width/2,clientY:box.top+box.height/2}));
+        return true;
+      }catch{return false;}
+    }
+    function openVinylPage(){
+      if(disposed||!store)return false;
+      try{
+        if(vinylPageOpen())return true;
+        const state=store.getState();
+        if(state?.app?.isMiniMode)dispatch('app/exitMiniMode',{actionId:'switchToFullMode'});
+        dispatch('app/showWindow',{});
+        lastControl={action:'openVinylPage',route:'ui-cover-click',at:now()};
+        let optimized=false;
+        const onOptimized=()=>{optimized=true;};
+        try{env.addEventListener?.('rnp-lyric-page-opened',onOptimized);}catch{}
+        const fallback=()=>{
+          try{env.removeEventListener?.('rnp-lyric-page-opened',onOptimized);}catch{}
+          if(disposed||optimized||vinylPageOpen())return;
+          try{
+            const page=store.getState()?.['page:vinylPage']?.pageState;
+            if(page==='opened'||page==='opening')return;
+            lastControl={action:'openVinylPage',route:'original-fallback',at:now()};
+            dispatch('playing/openVinylPage',{});
+          }catch(e){env.console?.warn('[MiniLyrics] 打开原版播放页失败',e);}
+        };
+        const attempt=count=>{
+          if(disposed||optimized)return;
+          if(vinylPageOpen())return;
+          if(clickPlayBarCover()){env.setTimeout?.(fallback,700);return;}
+          if(count>=8){fallback();return;}
+          env.setTimeout?.(()=>attempt(count+1),100);
+        };
+        attempt(0);
+        return true;
+      }catch(e){
+        lastControl={action:'openVinylPage',route:'original-model',at:now(),error:'vinyl-dispatch-failed'};
+        env.console?.warn('[MiniLyrics] 打开播放页失败',e);
+        return false;
+      }
+    }
+    function currentLiked(){
+      if(disposed||!store)return false;
+      try{
+        const state=store.getState(),p=state?.playing;
+        if(!p)return false;
+        // Voices carry their own liked flag; tracks are keyed by the online
+        // track id in the same map the play bar uses.
+        if(p.resourceType==='voice')return !!p.curVoice?.liked;
+        const key=String(p.onlineResourceId??p.resourceTrackId??'');
+        const map=state['async:hostResource']?.likeTracksMap;
+        return !!(key&&map&&map[key]);
+      }catch{return false;}
+    }
+    function toggleLike(){
+      if(disposed||!store)return false;
+      try{
+        lastControl={action:'like',route:'current-song',at:now()};
+        // "hotKey" makes the original model raise a tray balloon; the desktop
+        // lyrics scene is the correct origin and keeps the action silent.
+        return dispatch('async:hostResource/setLikeCurPlayingTrack',{from:'desktopLyric'});
+      }catch(e){
+        lastControl={action:'like',route:'current-song',at:now(),error:'like-dispatch-failed'};
+        env.console?.warn('[MiniLyrics] 喜欢当前歌曲失败',e);
+        return false;
+      }
     }
     function matches(id){
       if(!song||String(store?.getState()?.playing?.resourceTrackId)!==song.trackId||id==null||id==='')return false;
@@ -129,6 +237,7 @@
     }
     function release(){
       unsubscribe?.();unsubscribe=null;
+      unbindVinylEvents();
       for(const [name,fn]of bindings)try{bridge.removeRegisterCall(name,'audioplayer',fn);}catch(e){env.console?.warn('[MiniLyrics] 清理播放订阅失败',e);}
       bindings.clear();store=null;bridge=null;nativeAdapter=null;
     }
@@ -162,7 +271,7 @@
       if(!dva||!adapter?.registerCallMap||typeof selected?.appendRegisterCall!=='function'||typeof selected?.removeRegisterCall!=='function')return;
       store=dva.app._store;bridge=selected;nativeAdapter=adapter;bridgeSource=native?'internal':'legacy';
       try{
-        sync();unsubscribe=store.subscribe(isolate(sync));
+        sync();unsubscribe=store.subscribe(isolate(sync));bindVinylEvents();
         // Event binding is retried by sync/polling after native initialization.
         // Restore only a matching startup snapshot, never overwrite a newer event.
         const storage=findExport(require,v=>typeof v?.lastPlaying?.get==='function');
@@ -225,8 +334,38 @@
     function playbackControl(type,payload){
       cancelSeek(null,true);lastControl={action:type,route:'original-model',at:now()};return dispatch(type,payload);
     }
+    function playlistEntries(){
+      if(disposed||!store)return null;
+      let state;try{state=store.getState();}catch{return null;}
+      const list=state?.playingList?.curPlayingList;
+      if(!Array.isArray(list))return null;
+      const playing=state?.playing,currentId=String(playing?.curPlaying?.resourceId??playing?.curPlaying?.trackId??playing?.resourceTrackId??'');
+      const entries=[];
+      for(let index=0;index<list.length;index++){
+        const item=list[index];if(!item)continue;
+        const track=item.track&&(item.track.name!=null||item.track.id!=null)?item.track:(item.localTrack?.origin??item.localTrack??{});
+        const artists=Array.isArray(track?.artists)?track.artists.map(a=>a?.name??'').filter(Boolean).join(' / '):(item.track?.creator?.nickname??'');
+        const resourceId=String(item.resourceId??item.trackId??track?.id??'');
+        entries.push({index,resourceId,title:String(track?.name??item.text??''),artist:artists,
+          duration:Math.max(0,Number(track?.duration)||0),current:!!currentId&&resourceId===currentId});
+      }
+      return entries;
+    }
+    function playPlaylistIndex(index,resourceId=''){
+      if(disposed||!store||!Number.isInteger(index)||index<0)return false;
+      let list;try{list=store.getState()?.playingList?.curPlayingList;}catch{return false;}
+      if(!Array.isArray(list)||index>=list.length)return false;
+      let position=index;
+      if(resourceId){const found=list.findIndex(item=>String(item?.resourceId??item?.trackId??'')===String(resourceId));if(found>=0)position=found;}
+      const item=list[position];if(!item)return false;
+      lastControl={action:'select',route:'original-model',index:position,at:now()};
+      try{return dispatch('playing/playOneTrackInPlayingList',{item,switchType:'call',flag:0,triggerScene:'playingList'});}
+      catch(e){lastControl.error='select-dispatch-failed';env.console?.warn('[MiniLyrics] 切换歌曲失败',e);return false;}
+    }
     const api={version:'ncm3-v3',get ready(){return !!store&&!disposed;},getDiagnostics:diagnostics,
       getCurrentSong:()=>{sync();return song;},getPlaybackStatus:()=>status,getTimeline:()=>{bindEvents();scheduleStartupSeek();return timeline;},
+      getPlaylist:playlistEntries,playPlaylistIndex,
+      openVinylPage,isVinylPageOpen:vinylPageOpen,isCurrentLiked:currentLiked,toggleLike,
       addEventListener:(name,fn)=>{if(!events.has(name))events.set(name,new Set());events.get(name).add(fn);},
       removeEventListener:(name,fn)=>events.get(name)?.delete(fn),
       play:()=>playbackControl('playing/resume',{triggerScene:'desktopLyric'}),pause:()=>playbackControl('playing/pause',{triggerScene:'desktopLyric'}),

@@ -79,7 +79,36 @@ const MINILYRICS_VERSION="0.8.3";
       current:()=>output,snapshot:()=>({reportedPlaying:reported,playing:output,inferredFromProgress:inferred,
         progressSamples:run?.steps??0})};
   }
-  const api={finite, wellFormed, normalizeLines, metadata, createPlaybackState};
+  // Minimal LRC reader used only as a fallback when RNP exposes no lyrics
+  // (e.g. NetEase sitting in its tray/mini player). Metadata tags are ignored.
+  function parseLrc(text){
+    const out=[],seen=new Set(),head=/^\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]/;
+    for(const raw of String(text??'').split(/\r?\n/)){
+      let rest=raw,times=[],m;
+      while((m=head.exec(rest))){
+        times.push(((+m[1])*60+(+m[2]))*1000+(m[3]?Number((m[3]+'000').slice(0,3)):0));
+        rest=rest.slice(m[0].length);
+      }
+      const body=rest.trim();
+      if(!times.length||!body)continue;
+      for(const time of times){
+        const key=time+'|'+body;
+        if(seen.has(key))continue;
+        seen.add(key);out.push({time,text:body});
+      }
+    }
+    return out.sort((a,b)=>a.time-b.time);
+  }
+  // Merge the original and translated LRC by their timestamps.
+  function mergeLyrics(text,translatedText){
+    const translated=new Map();
+    for(const line of parseLrc(translatedText)){
+      const key=Math.round(line.time/10);
+      if(!translated.get(key))translated.set(key,line.text);
+    }
+    return parseLrc(text).map(line=>({time:line.time,text:line.text,translation:translated.get(Math.round(line.time/10))||''}));
+  }
+  const api={finite, wellFormed, normalizeLines, metadata, createPlaybackState, parseLrc, mergeLyrics};
   if(typeof module!=='undefined') module.exports=api; else root.MiniLyricsCore=api;
 })(typeof window!=='undefined'?window:globalThis);
 
@@ -88,7 +117,7 @@ const MINILYRICS_VERSION="0.8.3";
   'use strict';
   function createPlayerAdapter(env=root){
     let store=null,bridge=null,nativeAdapter=null,unsubscribe=null,disposed=false,starting=false,retry=null,webpackRequire=null;
-    let song=null,status='Paused',timeline=null,sequence=0,lastStoreState=null;
+    let song=null,status='Paused',timeline=null,sequence=0,lastStoreState=null,lastVinylOpen=null,lastLiked=null,vinylEventsBound=false;
     const events=new Map(),bindings=new Map(),eventNames=['PlayProgress','Seek','PlayState'];
     const now=()=>env.performance?.now?.()??Date.now();
     let lastAcceptedProgressAt=null,lastAcceptedSeekAt=null,bridgeSource=null;
@@ -139,7 +168,7 @@ const MINILYRICS_VERSION="0.8.3";
       return {canControl,bridgeSource,originalInitialization:'unverified',subscriptions,streamState,
         hasActualProgress:lastAcceptedProgressAt!==null,lastReceivedProgressAt:progress.lastReceivedAt,lastAcceptedProgressAt,lastAcceptedSeekAt,
         progressAgeMs:lastAcceptedProgressAt===null?null:Math.max(0,now()-lastAcceptedProgressAt),
-        timelineSource:timeline?.source??null,control:controlState(),events:Object.fromEntries(eventNames.map(name=>[name,{...nativeStats[name]}]))};
+        timelineSource:timeline?.source??null,vinylOpen:vinylPageOpen(),liked:currentLiked(),control:controlState(),events:Object.fromEntries(eventNames.map(name=>[name,{...nativeStats[name]}]))};
     }
     const emit=(name,detail)=>{for(const fn of [...events.get(name)??[]])try{fn({detail});}catch(e){env.console?.warn('[MiniLyrics] 播放订阅处理失败',e);}};
     const sameSong=(a,b)=>!!a&&!!b&&a.trackId===b.trackId&&a.ncmId===b.ncmId&&a.songName===b.songName&&a.authorName===b.authorName&&a.cover?.url===b.cover?.url&&a.duration===b.duration;
@@ -158,6 +187,8 @@ const MINILYRICS_VERSION="0.8.3";
     function sync(){
       if(disposed||!store)return;
       bindEvents();
+      const vinylOpen=vinylPageOpen();
+      if(vinylOpen!==lastVinylOpen){lastVinylOpen=vinylOpen;emit('vinylPageChange',{open:vinylOpen});}
       const next=readSong();if(!next)return;
       const changed=next.trackId!==song?.trackId,meta=!sameSong(next,song);
       if(changed){timeline=null;sequence++;lastStoreState=null;lastAcceptedProgressAt=null;lastAcceptedSeekAt=null;cancelSeek(null,true);}
@@ -169,9 +200,115 @@ const MINILYRICS_VERSION="0.8.3";
       if(stateChanged){status=nextStatus;lastStoreState=state;}
       if(timeline)timeline={...timeline,totalTime:song.duration};
       if(meta)emit('songChange',song);
+      if(changed)lastLiked=null;
+      const liked=currentLiked();
+      if(liked!==lastLiked){lastLiked=liked;emit('likeChange',{liked});}
       if(stateChanged)emit('playStateChange',status);
       if(sessionReady(store.getState()?.playing))resumeTrack=null;
       scheduleStartupSeek();
+    }
+    function onVinylEvent(){
+      if(disposed)return;
+      const open=vinylPageOpen();
+      if(open!==lastVinylOpen){lastVinylOpen=open;emit('vinylPageChange',{open});}
+    }
+    function bindVinylEvents(){
+      if(vinylEventsBound||typeof env.addEventListener!=='function')return;
+      vinylEventsBound=true;
+      env.addEventListener('rnp-lyric-page-opened',onVinylEvent);
+      env.addEventListener('rnp-lyric-page-closed',onVinylEvent);
+    }
+    function unbindVinylEvents(){
+      if(!vinylEventsBound)return;
+      vinylEventsBound=false;
+      try{env.removeEventListener?.('rnp-lyric-page-opened',onVinylEvent);env.removeEventListener?.('rnp-lyric-page-closed',onVinylEvent);}catch{}
+    }
+    function vinylPageOpen(){
+      if(disposed)return false;
+      try{
+        // RefinedNowPlayingNext paints its own page over the app and marks body
+        // with this class; the original vinyl page is tracked by redux instead.
+        if(env.document?.body?.classList?.contains('rnp-lyric-page-open'))return true;
+        return !!store&&store.getState()?.['page:vinylPage']?.pageState==='opened';
+      }catch{return false;}
+    }
+    function clickPlayBarCover(){
+      const doc=env.document;
+      if(!doc?.querySelector||typeof env.MouseEvent!=='function')return false;
+      let cover=null;
+      try{cover=doc.querySelector('.miniVinylWrapper')||doc.querySelector('[data-testid="tid_btn_pc_minibar_vinyl"]');}catch{}
+      if(!cover||typeof cover.dispatchEvent!=='function')return false;
+      let box={left:0,top:0,width:0,height:0};
+      try{box=cover.getBoundingClientRect?.()??box;}catch{}
+      try{
+        // A real bubbling click goes through RefinedNowPlayingNext's capture
+        // listeners (optimized page) or the app's own handler (original page).
+        cover.dispatchEvent(new env.MouseEvent('click',{bubbles:true,cancelable:true,composed:true,view:env,button:0,
+          clientX:box.left+box.width/2,clientY:box.top+box.height/2}));
+        return true;
+      }catch{return false;}
+    }
+    function openVinylPage(){
+      if(disposed||!store)return false;
+      try{
+        if(vinylPageOpen())return true;
+        const state=store.getState();
+        if(state?.app?.isMiniMode)dispatch('app/exitMiniMode',{actionId:'switchToFullMode'});
+        dispatch('app/showWindow',{});
+        lastControl={action:'openVinylPage',route:'ui-cover-click',at:now()};
+        let optimized=false;
+        const onOptimized=()=>{optimized=true;};
+        try{env.addEventListener?.('rnp-lyric-page-opened',onOptimized);}catch{}
+        const fallback=()=>{
+          try{env.removeEventListener?.('rnp-lyric-page-opened',onOptimized);}catch{}
+          if(disposed||optimized||vinylPageOpen())return;
+          try{
+            const page=store.getState()?.['page:vinylPage']?.pageState;
+            if(page==='opened'||page==='opening')return;
+            lastControl={action:'openVinylPage',route:'original-fallback',at:now()};
+            dispatch('playing/openVinylPage',{});
+          }catch(e){env.console?.warn('[MiniLyrics] 打开原版播放页失败',e);}
+        };
+        const attempt=count=>{
+          if(disposed||optimized)return;
+          if(vinylPageOpen())return;
+          if(clickPlayBarCover()){env.setTimeout?.(fallback,700);return;}
+          if(count>=8){fallback();return;}
+          env.setTimeout?.(()=>attempt(count+1),100);
+        };
+        attempt(0);
+        return true;
+      }catch(e){
+        lastControl={action:'openVinylPage',route:'original-model',at:now(),error:'vinyl-dispatch-failed'};
+        env.console?.warn('[MiniLyrics] 打开播放页失败',e);
+        return false;
+      }
+    }
+    function currentLiked(){
+      if(disposed||!store)return false;
+      try{
+        const state=store.getState(),p=state?.playing;
+        if(!p)return false;
+        // Voices carry their own liked flag; tracks are keyed by the online
+        // track id in the same map the play bar uses.
+        if(p.resourceType==='voice')return !!p.curVoice?.liked;
+        const key=String(p.onlineResourceId??p.resourceTrackId??'');
+        const map=state['async:hostResource']?.likeTracksMap;
+        return !!(key&&map&&map[key]);
+      }catch{return false;}
+    }
+    function toggleLike(){
+      if(disposed||!store)return false;
+      try{
+        lastControl={action:'like',route:'current-song',at:now()};
+        // "hotKey" makes the original model raise a tray balloon; the desktop
+        // lyrics scene is the correct origin and keeps the action silent.
+        return dispatch('async:hostResource/setLikeCurPlayingTrack',{from:'desktopLyric'});
+      }catch(e){
+        lastControl={action:'like',route:'current-song',at:now(),error:'like-dispatch-failed'};
+        env.console?.warn('[MiniLyrics] 喜欢当前歌曲失败',e);
+        return false;
+      }
     }
     function matches(id){
       if(!song||String(store?.getState()?.playing?.resourceTrackId)!==song.trackId||id==null||id==='')return false;
@@ -214,6 +351,7 @@ const MINILYRICS_VERSION="0.8.3";
     }
     function release(){
       unsubscribe?.();unsubscribe=null;
+      unbindVinylEvents();
       for(const [name,fn]of bindings)try{bridge.removeRegisterCall(name,'audioplayer',fn);}catch(e){env.console?.warn('[MiniLyrics] 清理播放订阅失败',e);}
       bindings.clear();store=null;bridge=null;nativeAdapter=null;
     }
@@ -247,7 +385,7 @@ const MINILYRICS_VERSION="0.8.3";
       if(!dva||!adapter?.registerCallMap||typeof selected?.appendRegisterCall!=='function'||typeof selected?.removeRegisterCall!=='function')return;
       store=dva.app._store;bridge=selected;nativeAdapter=adapter;bridgeSource=native?'internal':'legacy';
       try{
-        sync();unsubscribe=store.subscribe(isolate(sync));
+        sync();unsubscribe=store.subscribe(isolate(sync));bindVinylEvents();
         // Event binding is retried by sync/polling after native initialization.
         // Restore only a matching startup snapshot, never overwrite a newer event.
         const storage=findExport(require,v=>typeof v?.lastPlaying?.get==='function');
@@ -310,8 +448,38 @@ const MINILYRICS_VERSION="0.8.3";
     function playbackControl(type,payload){
       cancelSeek(null,true);lastControl={action:type,route:'original-model',at:now()};return dispatch(type,payload);
     }
+    function playlistEntries(){
+      if(disposed||!store)return null;
+      let state;try{state=store.getState();}catch{return null;}
+      const list=state?.playingList?.curPlayingList;
+      if(!Array.isArray(list))return null;
+      const playing=state?.playing,currentId=String(playing?.curPlaying?.resourceId??playing?.curPlaying?.trackId??playing?.resourceTrackId??'');
+      const entries=[];
+      for(let index=0;index<list.length;index++){
+        const item=list[index];if(!item)continue;
+        const track=item.track&&(item.track.name!=null||item.track.id!=null)?item.track:(item.localTrack?.origin??item.localTrack??{});
+        const artists=Array.isArray(track?.artists)?track.artists.map(a=>a?.name??'').filter(Boolean).join(' / '):(item.track?.creator?.nickname??'');
+        const resourceId=String(item.resourceId??item.trackId??track?.id??'');
+        entries.push({index,resourceId,title:String(track?.name??item.text??''),artist:artists,
+          duration:Math.max(0,Number(track?.duration)||0),current:!!currentId&&resourceId===currentId});
+      }
+      return entries;
+    }
+    function playPlaylistIndex(index,resourceId=''){
+      if(disposed||!store||!Number.isInteger(index)||index<0)return false;
+      let list;try{list=store.getState()?.playingList?.curPlayingList;}catch{return false;}
+      if(!Array.isArray(list)||index>=list.length)return false;
+      let position=index;
+      if(resourceId){const found=list.findIndex(item=>String(item?.resourceId??item?.trackId??'')===String(resourceId));if(found>=0)position=found;}
+      const item=list[position];if(!item)return false;
+      lastControl={action:'select',route:'original-model',index:position,at:now()};
+      try{return dispatch('playing/playOneTrackInPlayingList',{item,switchType:'call',flag:0,triggerScene:'playingList'});}
+      catch(e){lastControl.error='select-dispatch-failed';env.console?.warn('[MiniLyrics] 切换歌曲失败',e);return false;}
+    }
     const api={version:'ncm3-v3',get ready(){return !!store&&!disposed;},getDiagnostics:diagnostics,
       getCurrentSong:()=>{sync();return song;},getPlaybackStatus:()=>status,getTimeline:()=>{bindEvents();scheduleStartupSeek();return timeline;},
+      getPlaylist:playlistEntries,playPlaylistIndex,
+      openVinylPage,isVinylPageOpen:vinylPageOpen,isCurrentLiked:currentLiked,toggleLike,
       addEventListener:(name,fn)=>{if(!events.has(name))events.set(name,new Set());events.get(name).add(fn);},
       removeEventListener:(name,fn)=>events.get(name)?.delete(fn),
       play:()=>playbackControl('playing/resume',{triggerScene:'desktopLyric'}),pause:()=>playbackControl('playing/pause',{triggerScene:'desktopLyric'}),
@@ -336,6 +504,7 @@ const MINILYRICS_VERSION="0.8.3";
   let windowSession=null,reconnectTimer=null;
   let player=null,detachPlayer=null,song={id:'',ncmId:'',duration:0},lines=[];
   let position=0,anchor=performance.now(),playing=false,clockValid=false,offset=0;
+  let remoteLyrics={songId:'',at:-Infinity,pending:false};
   let sourcePosition=null,sourcePlaying=null,sourceKind=null,sourceAdvancedAt=0,hostState=null;
   let lastMeta='',lastLyrics='',lyricMode='waiting',lyricRevision=0,lastRnp=null,lastAppliedRnp=null;
   let pendingSeek=null,seekTimer=null,lastSeekId=0;
@@ -358,6 +527,32 @@ const MINILYRICS_VERSION="0.8.3";
   }catch{background=normalizeBackground();}
   function sendBackground(){send({type:'background',...background});}
   function changeBackground(patch){background=normalizeBackground({...background,...patch});try{plugin.setConfig?.('background',{...background});}catch(e){console.warn('[MiniLyrics] 背景设置保存失败',e);}sendBackground();}
+  let playlistRevision=0,playlistSignature='',playlistRetry=null;
+  function sendPlaylist(force=false){
+    let list;try{list=player?.getPlaylist?.();}catch{list=null;}
+    if(!Array.isArray(list))return false;
+    const currentIndex=list.findIndex(entry=>entry.current);
+    const signature=list.length+'|'+(list[0]?.resourceId??'')+'|'+(list[list.length-1]?.resourceId??'')+'|'+currentIndex;
+    if(!force&&signature===playlistSignature)return true;
+    playlistSignature=signature;
+    const MAX=4000;let entries=list,offset=0;
+    if(list.length>MAX){
+      const center=Math.max(0,currentIndex),start=Math.max(0,Math.min(list.length-MAX,center-Math.floor(MAX/2)));
+      entries=list.slice(start,start+MAX);offset=start;
+    }
+    send({type:'playlist',revision:++playlistRevision,current:currentIndex,
+      items:entries.map((entry,i)=>({index:Number.isInteger(entry.index)?entry.index:offset+i,
+        resourceId:String(entry.resourceId??''),title:String(entry.title??''),artist:String(entry.artist??''),
+        duration:Number(entry.duration)||0,current:!!entry.current}))});
+    return true;
+  }
+  function requestPlaylist(){
+    if(sendPlaylist(true))return;
+    if(player&&typeof player.getPlaylist!=='function'){send({type:'playlist',revision:++playlistRevision,current:-1,unsupported:true,items:[]});return;}
+    // Player not attached yet: retry silently; host re-requests while the panel is open.
+    clearTimeout(playlistRetry);
+    playlistRetry=setTimeout(()=>{if(!stopped&&socket?.readyState===1)sendPlaylist(true);},700);
+  }
   const listen=(target,name,fn)=>{target.addEventListener(name,fn);listeners.push([target,name,fn]);};
   const send=m=>{if(socket?.readyState!==1)return;try{socket.send(JSON.stringify(m,(_,v)=>typeof v==='string'?C.wellFormed(v):v));}catch(e){console.debug('[MiniLyrics] 小窗消息发送失败',e);socket?.close();}};
   const live=()=>position+(playing&&clockValid?Math.max(0,performance.now()-anchor):0);
@@ -388,6 +583,33 @@ const MINILYRICS_VERSION="0.8.3";
     if(aliases().has(providerId(snapshot))){setLyrics(snapshot);return;}
     for(const [id,d]of [...rnpCache].reverse())if(aliases().has(id)){setLyrics(d);return;}
   }
+  // Fallback source: RNP only publishes lyrics while its page is mounted, so a
+  // tray/mini NetEase window can stay silent. Fetch the song's LRC directly.
+  async function fetchRemoteLyrics(ncmId){
+    const url='https://music.163.com/api/song/lyric?id='+encodeURIComponent(ncmId)+'&lv=-1&kv=-1&tv=-1&rv=-1';
+    let response=null;
+    try{if(typeof window.betterncm?.fetch==='function')response=await window.betterncm.fetch(url);}catch{}
+    if(!response)try{response=await fetch(url,{credentials:'include'});}catch{}
+    if(!response||!response.ok)return null;
+    let data=null;try{data=await response.json();}catch{return null;}
+    const list=C.mergeLyrics(data?.lrc?.lyric??'',data?.tlyric?.lyric??'');
+    return list.length?list:null;
+  }
+  function maybeFetchLyrics(){
+    if(!player||!song.id||!song.ncmId||lyricMode!=='waiting'||remoteLyrics.pending)return;
+    const id=String(song.ncmId),now=performance.now();
+    if(remoteLyrics.songId===id&&now-remoteLyrics.at<60000)return;
+    remoteLyrics={songId:id,at:now,pending:true};
+    fetchRemoteLyrics(id).then(list=>{
+      if(stopped||!list||String(song.ncmId)!==id||lyricMode!=='waiting')return;
+      const normalized=C.normalizeLines(list);
+      if(!normalized.length)return;
+      const signature=JSON.stringify({mode:'timed',lines:normalized});
+      if(signature===lastLyrics)return;
+      lines=normalized;lyricMode='timed';lastLyrics=signature;
+      send({type:'lyrics',songId:song.id,revision:++lyricRevision,mode:lyricMode,lines});refreshStatus();
+    }).catch(e=>console.debug('[MiniLyrics] 直连歌词获取失败',e)).finally(()=>{remoteLyrics.pending=false;});
+  }
   function sendRnpStyle(force=false){
     const classes=document.body?.classList,names=['smooth','sharp','lazy','easeout'];let curve=0;
     for(let i=1;i<names.length;i++)if(classes?.contains('rnp-lyric-animation-timing-'+names[i]))curve=i;
@@ -404,12 +626,17 @@ const MINILYRICS_VERSION="0.8.3";
       sourcePosition=null;sourcePlaying=null;sourceKind=null;lines=[];lastLyrics='';lyricMode='waiting';lastAppliedRnp=null;hostState=null;
     }
     song=next;const signature=JSON.stringify(song);
-    if(signature!==lastMeta){lastMeta=signature;send({type:'track',...song});}
+    if(signature!==lastMeta){lastMeta=signature;send({type:'track',...song});sendLiked();}
     return true;
   }
   function sendClock(seekState=''){
     send({type:'clock',songId:song.id,position:live(),playing,valid:clockValid,
       duration:song.duration,offset,seekRequest:lastSeekId,seekState});refreshStatus();
+  }
+  function sendLiked(){
+    if(!song.id)return;
+    let liked=false;try{liked=!!player?.isCurrentLiked?.();}catch{}
+    send({type:'liked',liked});
   }
   function playerTimelineFresh(){
     return !!player&&clockValid&&sourcePosition!==null&&(sourcePlaying===false||performance.now()-sourceAdvancedAt<STALE_MS);
@@ -479,6 +706,20 @@ const MINILYRICS_VERSION="0.8.3";
     if(m.action==='seek')return seek(m.position,m.requestId,m.songId);
     if(m.action==='play'){if(player?.togglePlay)player.togglePlay();else player?.[player.getPlaybackStatus?.()==='Playing'?'pause':'play']?.();return;}
     if(m.action==='previous'||m.action==='next')player?.[m.action]?.();
+    if(m.action==='playlist')return requestPlaylist();
+    if(m.action==='like'){player?.toggleLike?.();return;}
+    if(m.action==='detail'){
+      if(!player)return;
+      if(player.isVinylPageOpen?.()){send({type:'nowplaying',open:true});return;}
+      if(player.openVinylPage?.()!==true)send({type:'nowplaying',open:false});
+      return;
+    }
+    if(m.action==='font')return changeFontSize(m.position);
+    if(m.action==='select'){
+      const index=Number(m.index);
+      if(!Number.isInteger(index))return;
+      if(player?.playPlaylistIndex?.(index,m.resourceId??'')!==false){playlistSignature='';clearTimeout(playlistRetry);playlistRetry=setTimeout(()=>{if(!stopped&&socket?.readyState===1)sendPlaylist(true);},220);}
+    }
   }
   function attachPlayer(){
     const candidate=(playerAdapter.ready?playerAdapter:null),api=typeof candidate?.getCurrentSong==='function'&&typeof candidate?.getTimeline==='function'?candidate:null;
@@ -498,7 +739,9 @@ const MINILYRICS_VERSION="0.8.3";
       if(!sample(undefined,e.detail)){playing=playback.current();sendClock(pendingSeek?'pending':'');}
     };
     const onControlError=e=>{const own=pendingSeek;if(player===api&&own&&e.detail?.requestId===own.id&&e.detail?.songId===own.songId)failSeek(own,e.detail.reason);};
-    const bindings=[['timelineUpdate',onTimeline],['songChange',onSong],['playStateChange',onPlaying],['controlError',onControlError]];
+    const onVinyl=e=>{if(player===api)send({type:'nowplaying',open:!!e.detail?.open});};
+    const onLike=e=>{if(player===api)send({type:'liked',liked:!!e.detail?.liked});};
+    const bindings=[['timelineUpdate',onTimeline],['songChange',onSong],['playStateChange',onPlaying],['controlError',onControlError],['vinylPageChange',onVinyl],['likeChange',onLike]];
     for(const [name,fn]of bindings)api.addEventListener?.(name,fn);
     detachPlayer=()=>{for(const [name,fn]of bindings)api.removeEventListener?.(name,fn);};
     status='已连接';
@@ -506,7 +749,7 @@ const MINILYRICS_VERSION="0.8.3";
   function tick(){
     if(stopped||socket?.readyState!==1)return;
     try{
-      attachPlayer();sample();sendRnpStyle();
+      attachPlayer();sample();sendRnpStyle();maybeFetchLyrics();
       if(playing&&clockValid&&!pendingSeek&&!playerTimelineFresh()){
         position=live();anchor=performance.now();clockValid=false;status='等待 网易云播放器 播放进度';sendClock();
       }
@@ -591,6 +834,7 @@ const MINILYRICS_VERSION="0.8.3";
     send({type:'hello',token:own.token});
     if(song.id){
       send({type:'track',...song});
+      sendLiked();
       if(lastAppliedRnp)send({type:'lyrics',songId:song.id,revision:++lyricRevision,mode:lyricMode,lines});
       if(clockValid||offset!==0)sendClock();
     }
@@ -654,10 +898,57 @@ const MINILYRICS_VERSION="0.8.3";
     if(own&&!connected&&!own.connecting)retireWindow(own);
     status='小窗已关闭';refreshStatus();
   }
+  const RNP_BUTTON_ICON='data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect x="2.8" y="4.8" width="14.4" height="10.4" rx="2.4" fill="none" stroke="#000" stroke-width="1.8"/><path d="M6 8.4h8M6 11.2h5" stroke="#000" stroke-width="1.8" stroke-linecap="round"/><rect x="13.6" y="13.6" width="7.6" height="5.6" rx="1.8" fill="#000"/></svg>');
+  function ensureRnpButtonStyle(){
+    if(document.getElementById('minilyrics-rnp-button-style'))return;
+    const style=document.createElement('style');
+    style.id='minilyrics-rnp-button-style';
+    // Reuse RNP's own tool chrome, but swap the glyph for a "small window" mark.
+    style.textContent='#rnp-view .rnp-window-tool-minilyrics::before{width:14px;height:14px;border:none;border-radius:0;background:currentColor;'+
+      '-webkit-mask-image:url("'+RNP_BUTTON_ICON+'");-webkit-mask-repeat:no-repeat;-webkit-mask-position:center;-webkit-mask-size:contain;'+
+      'mask-image:url("'+RNP_BUTTON_ICON+'");mask-repeat:no-repeat;mask-position:center;mask-size:contain}'+
+      '#rnp-view .rnp-window-tool-minilyrics::after{display:none}';
+    document.head?.append(style);
+  }
+  function closeRnpPage(){
+    try{
+      // RNP's injected close tool runs its own teardown (body class + closed event).
+      const close=document.querySelector('#rnp-view .rnp-window-tool-plugin-close');
+      if(close){close.click();return true;}
+    }catch(e){console.debug('[MiniLyrics] 关闭 RNP 播放页失败',e);}
+    return false;
+  }
+  function ensureRnpButton(){
+    if(stopped)return;
+    try{
+      if(!document.body?.classList?.contains('rnp-lyric-page-open'))return;
+      const tools=document.querySelector('#rnp-view .rnp-window-tools');
+      if(!tools)return;
+      ensureRnpButtonStyle();
+      let button=tools.querySelector('.rnp-window-tool-minilyrics');
+      if(!button){
+        button=document.createElement('button');
+        button.type='button';
+        button.className='rnp-window-tool rnp-window-tool-minilyrics';
+        button.title='切换到 MiniLyrics 小窗';
+        button.setAttribute('aria-label','切换到 MiniLyrics 小窗');
+        tools.insertBefore(button,tools.querySelector('.rnp-window-tool-plugin-close')??null);
+      }
+      // Rebind after a plugin reload; the old instance's handler is inert.
+      if(button.__miniLyricsClick)button.removeEventListener('click',button.__miniLyricsClick);
+      button.__miniLyricsClick=event=>{
+        event.preventDefault();event.stopPropagation();
+        open();
+        closeRnpPage();
+      };
+      button.addEventListener('click',button.__miniLyricsClick);
+    }catch(e){console.debug('[MiniLyrics] 注入小窗按钮失败',e);}
+  }
   function dispose(){
     // Page reload/unload is temporary bridge loss, not a user close request.
     if(windowSession)rememberWindow(windowSession);
     stopped=true;session++;busy=false;clearTimeout(reconnectTimer);reconnectTimer=null;
+    clearTimeout(playlistRetry);playlistRetry=null;
     const previous=socket;socket=null;releaseConnection();previous?.close();
     for(const [target,name,fn]of listeners)target.removeEventListener?.(name,fn);
     playerAdapter.dispose();
@@ -676,6 +967,7 @@ const MINILYRICS_VERSION="0.8.3";
         windowSession={port:saved.port,token:saved.token,session:++session,connecting:false};queueReconnect(windowSession,0);
       }
     }catch{}
+    ensureRnpButton();
   });
   plugin.onConfig(()=>{
     const el=document.createElement('div');el.style.cssText='padding:24px;line-height:1.8;max-width:700px';
@@ -714,7 +1006,7 @@ const MINILYRICS_VERSION="0.8.3";
     lyricMode,lyricSource:lyricMode==='waiting'?'等待 RNP':lyricMode==='empty'?'RNP 暂无歌词':'RNP 歌词',lyricRevision,rnpSongId:providerId(window.currentLyrics),
     host:hostState,playerVersion:player?.version??null,playerFresh:playerTimelineFresh(),playerDiagnostics:playerAdapter.getDiagnostics?.()??null,
     seekPending:!!pendingSeek,seekRequest:lastSeekId,playbackState:playback.snapshot(),fontSize,background:{...background}})};
-  listen(window,'rnp-lyric-page-opened',resyncPage);
+  listen(window,'rnp-lyric-page-opened',()=>{ensureRnpButton();resyncPage();});
   listen(window,'rnp-lyric-page-closed',resyncPage);
   listen(window,'focus',resyncPage);
   listen(document,'visibilitychange',resyncPage);

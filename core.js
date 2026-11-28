@@ -77,6 +77,35 @@
       current:()=>output,snapshot:()=>({reportedPlaying:reported,playing:output,inferredFromProgress:inferred,
         progressSamples:run?.steps??0})};
   }
-  const api={finite, wellFormed, normalizeLines, metadata, createPlaybackState};
+  // Minimal LRC reader used only as a fallback when RNP exposes no lyrics
+  // (e.g. NetEase sitting in its tray/mini player). Metadata tags are ignored.
+  function parseLrc(text){
+    const out=[],seen=new Set(),head=/^\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]/;
+    for(const raw of String(text??'').split(/\r?\n/)){
+      let rest=raw,times=[],m;
+      while((m=head.exec(rest))){
+        times.push(((+m[1])*60+(+m[2]))*1000+(m[3]?Number((m[3]+'000').slice(0,3)):0));
+        rest=rest.slice(m[0].length);
+      }
+      const body=rest.trim();
+      if(!times.length||!body)continue;
+      for(const time of times){
+        const key=time+'|'+body;
+        if(seen.has(key))continue;
+        seen.add(key);out.push({time,text:body});
+      }
+    }
+    return out.sort((a,b)=>a.time-b.time);
+  }
+  // Merge the original and translated LRC by their timestamps.
+  function mergeLyrics(text,translatedText){
+    const translated=new Map();
+    for(const line of parseLrc(translatedText)){
+      const key=Math.round(line.time/10);
+      if(!translated.get(key))translated.set(key,line.text);
+    }
+    return parseLrc(text).map(line=>({time:line.time,text:line.text,translation:translated.get(Math.round(line.time/10))||''}));
+  }
+  const api={finite, wellFormed, normalizeLines, metadata, createPlaybackState, parseLrc, mergeLyrics};
   if(typeof module!=='undefined') module.exports=api; else root.MiniLyricsCore=api;
 })(typeof window!=='undefined'?window:globalThis);

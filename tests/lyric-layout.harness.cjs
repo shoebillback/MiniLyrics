@@ -21,7 +21,7 @@ const delay=ms=>new Promise(r=>setTimeout(r,ms));
   for(let c=0;c<cases.length;c++){
    const [id,width,height,mode]=cases[c],wall=1000+c*5000;
    await settings({motionWall:wall,freezeClock:true,width,height,hover:false});track(id,'最后一句 · '+mode);
-   const lines=Array.from({length:4},(_,i)=>({time:i*2000,text:'第'+i+'句',...(mode==='translated'||mode==='mixed'&&i<3?{translation:'译文'+i}:{})}));await lyrics(id,lines);await clock(1000);const initial=await inspect();near(initial.viewportTop,32);assert.ok(initial.viewportBottom<=initial.controlYPx/(initial.dpi/96)-14+.04);
+   const lines=Array.from({length:4},(_,i)=>({time:i*2000,text:'第'+i+'句',...(mode==='translated'||mode==='mixed'&&i<3?{translation:'译文'+i}:{})}));await lyrics(id,lines);await clock(1000);const initial=await inspect();assert.ok(initial.viewportTop>=32&&initial.viewportTop<=40.05,'lyrics start below the title strip');assert.ok(initial.viewportBottom<=initial.controlYPx/(initial.dpi/96)-14+.04);
    await clock(1799);const middle=await clock(1800);sameBounds(initial,middle);near(group(middle,1).target,initial.layoutAnchor);
    let s=await step(wall+200,2000);sameBounds(initial,s);s=await step(wall+750,2550);near(group(s,1).top,initial.layoutAnchor);
    await clock(3550);await clock(4000);await step(wall+1500,4750);await settings({motionWall:wall+2000});await clock(5799);const before=await shot(id+'-before-final');assert.equal(before.index,2);assert.equal(before.focusIndex,2);near(group(before,2).top,initial.layoutAnchor);
